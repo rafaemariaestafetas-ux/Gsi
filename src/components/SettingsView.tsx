@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../services/supabaseClient';
 import { Profile } from '../types';
 import { motion } from 'motion/react';
-import { Bell, Save, ChevronLeft, Clock, Calendar, LogOut, User, HardHat, Briefcase, Euro, Phone, MapPin, Camera, Loader2 } from 'lucide-react';
+import { Bell, Save, ChevronLeft, Clock, Calendar, LogOut, User, HardHat, Briefcase, Euro, Phone, MapPin, Camera, Loader2, Smartphone, ShieldCheck } from 'lucide-react';
+import FCMPushModal from './FCMPushModal';
 
 interface SettingsViewProps {
   userId: string;
@@ -15,6 +16,7 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [isFCMModalOpen, setIsFCMModalOpen] = useState(false);
   
   // Profile State
   const [fullName, setFullName] = useState('');
@@ -268,6 +270,38 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
           </div>
         </div>
 
+        {/* Firebase Cloud Messaging Push Section */}
+        <div className="p-6 bg-gradient-to-br from-[#1c2431] to-[#0f172a] border border-[#d4af37]/30 rounded-3xl space-y-4 shadow-xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-[#d4af37]/5 rounded-full blur-2xl pointer-events-none" />
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-[#d4af37]/15 rounded-2xl text-[#d4af37] border border-[#d4af37]/30 shadow-md">
+                <Smartphone size={24} />
+              </div>
+              <div>
+                <h3 className="text-sm font-black uppercase tracking-wider text-white flex items-center gap-2">
+                  Notificações Push Firebase (FCM)
+                  <span className="text-[7px] bg-[#d4af37] text-black px-1.5 py-0.5 rounded font-mono uppercase font-black">
+                    App Fechado
+                  </span>
+                </h3>
+                <p className="text-[10px] text-white/50 mt-0.5 leading-relaxed">
+                  Receba alertas na tela do celular mesmo se o app ou navegador estiver totalmente fechado.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsFCMModalOpen(true)}
+            className="w-full py-4 bg-[#d4af37] text-black font-black uppercase text-xs tracking-widest rounded-2xl shadow-lg shadow-[#d4af37]/20 hover:scale-[1.01] active:scale-98 transition-all flex items-center justify-center gap-2"
+          >
+            <Bell size={16} />
+            Configurar e Testar Alertas Push
+          </button>
+        </div>
+
         <div className="space-y-6">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-[#d4af37]/10 rounded-lg text-[#d4af37]"><Clock size={20} /></div>
@@ -336,6 +370,12 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
           Os alertas serão enviados apenas se houver pendência no registro de ponto para o dia atual no horário selecionado.
         </p>
       </div>
+
+      <FCMPushModal 
+        isOpen={isFCMModalOpen} 
+        onClose={() => setIsFCMModalOpen(false)} 
+        userId={userId} 
+      />
     </div>
   );
 }

@@ -148,6 +148,8 @@ const ReportTemplate: React.FC<ReportTemplateProps> = ({
             {daysArray.map((day) => {
               const entry = getEntryForDay(day);
               const isInvalidDay = day > daysInMonth;
+              const dateObj = new Date(year, month, day);
+              const isSunday = !isInvalidDay && dateObj.getDay() === 0;
               
               return (
                 <tr key={day} style={{ height: '20px', backgroundColor: 'transparent' }}>
@@ -156,12 +158,18 @@ const ReportTemplate: React.FC<ReportTemplateProps> = ({
                     textAlign: 'center', 
                     fontWeight: 'bold',
                     backgroundColor: headerBg,
-                    width: '30px'
+                    width: '30px',
+                    color: isSunday ? '#c00000' : 'inherit'
                   }}>
                     {day.toString().padStart(2, '0')}
                   </td>
-                  <td style={{ border: `1px solid ${borderColor}`, textAlign: 'center', color: entry?.is_absence ? 'red' : 'inherit', fontWeight: entry?.is_absence ? 'bold' : 'normal' }}>
-                    {!isInvalidDay && (entry?.is_absence ? 'FALTA' : entry?.hours)}
+                  <td style={{ 
+                    border: `1px solid ${borderColor}`, 
+                    textAlign: 'center', 
+                    color: isSunday ? '#c00000' : (entry?.is_absence ? 'red' : 'inherit'), 
+                    fontWeight: (isSunday || entry?.is_absence) ? 'bold' : 'normal' 
+                  }}>
+                    {!isInvalidDay && (isSunday ? 'DOMINGO' : (entry?.is_absence ? 'FALTA' : entry?.hours || ''))}
                   </td>
                   <td style={{ 
                     border: `1px solid ${borderColor}`, 
@@ -169,18 +177,21 @@ const ReportTemplate: React.FC<ReportTemplateProps> = ({
                     textTransform: 'uppercase',
                     whiteSpace: 'nowrap',
                     overflow: 'hidden',
-                    color: entry?.is_absence ? 'red' : 'inherit'
+                    color: isSunday ? '#c00000' : (entry?.is_absence ? 'red' : 'inherit'),
+                    fontWeight: isSunday ? 'bold' : 'normal'
                   }}>
-                    {!isInvalidDay && (entry?.is_absence ? (entry.absence_reason || 'MOTIVO NÃO INFORMADO') : entry?.obra)}
+                    {!isInvalidDay && (isSunday ? 'DOMINGO' : (entry?.is_absence ? (entry.absence_reason || 'MOTIVO NÃO INFORMADO') : entry?.obra || ''))}
                   </td>
                   <td style={{ 
                     border: `1px solid ${borderColor}`, 
                     padding: '0 8px', 
                     textTransform: 'uppercase',
                     whiteSpace: 'nowrap',
-                    overflow: 'hidden'
+                    overflow: 'hidden',
+                    color: isSunday ? '#c00000' : 'inherit',
+                    fontWeight: isSunday ? 'bold' : 'normal'
                   }}>
-                    {!isInvalidDay && entry && (entry.is_absence ? 'FALTA JUSTIFICADA' : userRole.toUpperCase())}
+                    {!isInvalidDay && (isSunday ? 'DOMINGO' : (entry ? (entry.is_absence ? 'FALTA JUSTIFICADA' : userRole.toUpperCase()) : ''))}
                   </td>
                 </tr>
               );

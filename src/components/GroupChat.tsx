@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../services/supabaseClient';
 import { ChatGroup, GroupMessage, GroupMember, MessageReaction, Profile } from '../types';
 import { 
@@ -19,11 +19,14 @@ import {
   Loader2,
   Camera,
   Play,
-  Pause
+  Pause,
+  LogOut,
+  Square
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { AudioPlayer } from './AudioPlayer';
+import { triggerBackgroundNotification } from '../services/firebaseMessaging';
 
 interface GroupChatProps {
   currentUserId: string;
@@ -63,10 +66,35 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
   const [newMessage, setNewMessage] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [audioPreviewUrl, setAudioPreviewUrl] = useState<string | null>(null);
+  const timerRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const groupCoverInputRef = useRef<HTMLInputElement>(null);
+
+  const cleanupActiveStream = useCallback(() => {
+    if (mediaStreamRef.current) {
+      try {
+        mediaStreamRef.current.getTracks().forEach(track => {
+          track.stop();
+          track.enabled = false;
+        });
+      } catch (err) {
+        console.warn('Error stopping track in GroupChat:', err);
+      }
+      mediaStreamRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      cleanupActiveStream();
+    };
+  }, [cleanupActiveStream]);
 
   useEffect(() => {
     fetchGroups();
@@ -79,14 +107,14 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
       fetchGroupMembers();
       const channel = supabase
         .channel(`group-${selectedGroup.id}`)
-        .on('postgres_changes', { 
+        .on('postgres_changes' as any, { 
           event: 'INSERT', 
           table: 'group_messages',
           filter: `group_id=eq.${selectedGroup.id}`
-        }, (payload) => {
+        }, () => {
           fetchMessages();
         })
-        .on('postgres_changes', {
+        .on('postgres_changes' as any, {
           event: '*',
           table: 'message_reactions'
         }, () => {
@@ -320,6 +348,8 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
         sender_name: userName
       };
 
+      const contentPreview = type === 'text' ? newMessage : (type === 'audio' ? '🎵 Mensagem de áudio' : '📷 Imagem');
+
       const { error } = await supabase.from('group_messages').insert([messageData]);
       
       if (error) {
@@ -327,6 +357,16 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
         alert('Erro ao enviar mensagem: ' + error.message);
         return;
       }
+
+      triggerBackgroundNotification({
+        senderId: currentUserId,
+        senderName: userName,
+        recipientId: `group_${selectedGroup.id}`,
+        title: `Grupo: ${selectedGroup.name} 👥`,
+        body: `${userName}: ${contentPreview}`,
+        type: 'group_message',
+        data: { url: '/messages', groupId: selectedGroup.id }
+      });
 
       setNewMessage('');
       setAudioBlob(null);
@@ -359,29 +399,50 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
 
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      cleanupActiveStream();
+      if (audioPreviewUrl) {
+        URL.revokeObjectURL(audioPreviewUrl);
+        setAudioPreviewUrl(null);
+      }
+      setAudioBlob(null);
+      setRecordingTime(0);
+
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
+      mediaStreamRef.current = stream;
       
-      // Better MIME type detection for mobile compatibility (iOS/Android)
-      // iOS prefers audio/mp4 or audio/aac
-      // Android prefers audio/webm
       const types = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
         'audio/mp4;codecs=mp4a.40.2',
         'audio/mp4',
         'audio/aac',
-        'audio/webm;codecs=opus',
         'audio/ogg;codecs=opus',
         'audio/wav'
       ];
       
       let mimeType = '';
       for (const type of types) {
-        if (MediaRecorder.isTypeSupported(type)) {
+        if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(type)) {
           mimeType = type;
           break;
         }
       }
 
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const recorderOptions: MediaRecorderOptions = {};
+      if (mimeType) {
+        recorderOptions.mimeType = mimeType;
+      }
+      recorderOptions.audioBitsPerSecond = 64000;
+
+      const recorder = new MediaRecorder(stream, recorderOptions);
+      mediaRecorderRef.current = recorder;
+      setMediaRecorder(recorder);
       const chunks: BlobPart[] = [];
 
       recorder.ondataavailable = (e) => {
@@ -389,23 +450,53 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
       };
 
       recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: mimeType || 'audio/wav' });
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+        cleanupActiveStream();
+        const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
         setAudioBlob(blob);
+        const preview = URL.createObjectURL(blob);
+        setAudioPreviewUrl(preview);
+        setIsRecording(false);
       };
 
-      recorder.start();
-      setMediaRecorder(recorder);
+      recorder.start(500);
       setIsRecording(true);
+      setRecordingTime(0);
+
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
     } catch (err) {
-      alert('Permissão de microfone negada ou erro ao iniciar gravação.');
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      cleanupActiveStream();
+      setIsRecording(false);
+      console.warn('Microphone access note in GroupChat:', err);
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorder) {
-      mediaRecorder.stop();
-      setIsRecording(false);
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
     }
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      try {
+        recorder.stop();
+      } catch (err) {
+        cleanupActiveStream();
+      }
+    } else {
+      cleanupActiveStream();
+    }
+    setIsRecording(false);
   };
 
   const sendAudio = async () => {
@@ -413,23 +504,35 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
 
     setIsUploading(true);
     try {
-      const extension = audioBlob.type.includes('webm') ? 'webm' : audioBlob.type.includes('ogg') ? 'ogg' : 'wav';
-      const fileName = `audio_${Date.now()}.${extension}`;
+      const mimeType = audioBlob.type || 'audio/webm';
+      const cleanType = mimeType.split(';')[0];
+      
+      let extension = 'webm';
+      if (cleanType.includes('mp4')) extension = 'mp4';
+      else if (cleanType.includes('aac')) extension = 'aac';
+      else if (cleanType.includes('ogg')) extension = 'ogg';
+      else if (cleanType.includes('wav')) extension = 'wav';
+
+      const fileName = `audio_${Date.now()}_${Math.random().toString(36).substring(7)}.${extension}`;
       const filePath = `group-audio/${selectedGroup.id}/${fileName}`;
 
       const { error: uploadError } = await supabase.storage
-        .from('avatars')
-        .upload(filePath, audioBlob, {
-          contentType: audioBlob.type,
-          cacheControl: '3600',
-          upsert: false
-        });
+          .from('avatars')
+          .upload(filePath, audioBlob, {
+            contentType: cleanType,
+            cacheControl: '3600',
+            upsert: true
+          });
 
       if (uploadError) throw uploadError;
 
       const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(filePath);
       await handleSendMessage('audio', publicUrl);
       setAudioBlob(null);
+      if (audioPreviewUrl) {
+        URL.revokeObjectURL(audioPreviewUrl);
+        setAudioPreviewUrl(null);
+      }
     } catch (err) {
       console.error('Audio upload error:', err);
       alert('Erro ao enviar áudio. Verifique sua conexão.');
@@ -660,13 +763,20 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
-            className="fixed inset-0 z-[100] flex flex-col overflow-hidden bg-[#0c111d] md:relative md:inset-auto md:z-0 md:h-full"
+            className="fixed inset-0 z-[100] flex flex-col overflow-hidden bg-[#efeae2] md:relative md:inset-auto md:z-0 md:h-full"
           >
-            {/* WhatsApp Background Pattern - Lighter & Clearer */}
-            <div className="absolute inset-0 opacity-[0.07] pointer-events-none" style={{ backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")', backgroundSize: '400px' }} />
+            {/* WhatsApp Custom Light Background Pattern */}
+            <div 
+              className="absolute inset-0 opacity-40 pointer-events-none" 
+              style={{ 
+                backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")', 
+                backgroundSize: '380px',
+                backgroundRepeat: 'repeat'
+              }} 
+            />
 
             {/* Chat Header - Immersive */}
-            <div className="safe-area-top pt-10 pb-4 px-6 bg-[#1c2431]/95 backdrop-blur-xl border-b border-white/5 flex items-center justify-between shadow-2xl relative z-10">
+            <div className="safe-area-top pt-10 pb-4 px-6 bg-[#1c2431] border-b border-white/10 flex items-center justify-between shadow-2xl relative z-10">
               <div className="flex items-center gap-4">
                 <button 
                   onClick={() => setSelectedGroup(null)} 
@@ -735,13 +845,13 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
             {/* Messages Area - Full Flex */}
             <div 
               ref={scrollRef}
-              className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar pb-10"
+              className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar pb-10 relative z-10"
             >
-              <div className="flex flex-col items-center justify-center py-10 opacity-20 space-y-4">
-                <div className="w-16 h-16 rounded-3xl border-2 border-dashed border-[#d4af37] flex items-center justify-center">
-                  <MessageSquare size={24} className="text-[#d4af37]" />
+              <div className="flex flex-col items-center justify-center py-6 opacity-60 space-y-2">
+                <div className="px-4 py-1.5 rounded-full bg-white/80 border border-slate-200/80 shadow-sm flex items-center gap-2 text-slate-600">
+                  <Lock size={12} className="text-[#075e54]" />
+                  <span className="text-[9px] font-bold uppercase tracking-wider">Conversa de Grupo GSI PRO</span>
                 </div>
-                <p className="text-[10px] font-black uppercase tracking-[0.4em]">Início da Conversa</p>
               </div>
 
               {messages.map((msg, i) => {
@@ -750,80 +860,86 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                 
                 // Find member profile for avatar
                 const member = groupMembers.find(m => m.user_id === msg.sender_id);
-                const senderName = member?.profiles.full_name || msg.sender_name || 'Usuário';
-                const senderAvatar = member?.profiles.avatar_url;
+                const senderName = isMe ? (userName || 'Você') : (member?.profiles.full_name || msg.sender_name || 'Colega');
+                const senderAvatar = isMe ? userAvatar : member?.profiles.avatar_url;
 
                 return (
-                  <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} mb-6 px-2`}>
+                  <div key={msg.id || i} className={`flex ${isMe ? 'justify-end' : 'justify-start'} mb-5 px-1`}>
                     {msg.sender_name === 'Sistema' ? (
                       <div className="w-full flex justify-center py-2">
-                        <span className="bg-black/20 backdrop-blur-md px-4 py-1 rounded-full text-[9px] font-black text-white/40 uppercase tracking-widest border border-white/5">
+                        <span className="bg-white/95 backdrop-blur-md px-4 py-1 rounded-full text-[10px] font-bold text-slate-600 uppercase tracking-widest border border-slate-200 shadow-sm">
                           {msg.content}
                         </span>
                       </div>
                     ) : (
-                      <>
-                        {!isMe && (
-                          <div className="w-9 h-9 rounded-xl overflow-hidden mr-2 self-end border border-white/10 shadow-lg flex-shrink-0 mb-1">
-                            {senderAvatar ? (
-                              <img src={senderAvatar} className="w-full h-full object-cover" />
-                            ) : (
-                              <div className="w-full h-full bg-[#1c2431] flex items-center justify-center text-[12px] font-black text-[#d4af37]">
-                                {senderName.charAt(0).toUpperCase()}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        
-                        <div className={`max-w-[80%] flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                          {!isMe && (
-                            <div className="flex items-center gap-2 mb-1.5 ml-1">
-                              <span className="text-[11px] font-black text-[#d4af37] uppercase tracking-wider">{senderName}</span>
-                              {msg.sender_id === selectedGroup.created_by && (
-                                <span className="bg-[#d4af37] text-black text-[7px] font-black px-1.5 py-0.5 rounded uppercase shadow-sm">ADM</span>
-                              )}
+                      <div className={`flex items-end gap-2.5 max-w-[85%] ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
+                        {/* Avatar beside message balloon */}
+                        <div className="w-8 h-8 rounded-full overflow-hidden shadow-sm flex-shrink-0 mb-1 border border-white bg-slate-300">
+                          {senderAvatar ? (
+                            <img src={senderAvatar} className="w-full h-full object-cover" alt={senderName} />
+                          ) : (
+                            <div className={`w-full h-full flex items-center justify-center text-xs font-black ${isMe ? 'bg-[#d4af37] text-black' : 'bg-slate-700 text-[#d4af37]'}`}>
+                              {senderName.charAt(0).toUpperCase()}
                             </div>
                           )}
-                          
+                        </div>
+
+                        {/* Balloon and Sender Name */}
+                        <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} min-w-0`}>
+                          {/* Sender Name above message balloon */}
+                          <div className={`flex items-center gap-1.5 mb-1 px-1 ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
+                            <span className={`text-[11px] font-black tracking-wide ${isMe ? 'text-[#075e54]' : 'text-[#128c7e]'}`}>
+                              {isMe ? 'Você' : senderName}
+                            </span>
+                            {msg.sender_id === selectedGroup.created_by && (
+                              <span className="bg-[#d4af37] text-black text-[7px] font-black px-1.5 py-0.5 rounded uppercase font-mono shadow-sm">
+                                ADM
+                              </span>
+                            )}
+                          </div>
+
                           <div className="relative group">
                             {/* Message Content Bubble */}
                             <div className={`
-                              px-4 py-3 rounded-2xl shadow-xl relative
+                              px-4 py-2.5 rounded-2xl shadow-sm relative text-xs
                               ${isMe 
-                                ? 'bg-[#d4af37] text-black rounded-tr-none' 
-                                : 'bg-[#1c2431] text-white rounded-tl-none border border-white/5'
+                                ? 'bg-[#d9fdd3] text-[#111b21] rounded-tr-none border border-[#c2f0b9]' 
+                                : 'bg-white text-[#111b21] rounded-tl-none border border-slate-200/80'
                               }
                             `}>
                               {/* Triangle Tip */}
                               <div className={`
                                 absolute top-0 w-3 h-3 
                                 ${isMe 
-                                  ? 'left-full -ml-1 border-l-[12px] border-l-[#d4af37] border-b-[12px] border-b-transparent' 
-                                  : 'right-full -mr-1 border-r-[12px] border-r-[#1c2431] border-b-[12px] border-b-transparent'
+                                  ? 'left-full -ml-1 border-l-[10px] border-l-[#d9fdd3] border-b-[10px] border-b-transparent' 
+                                  : 'right-full -mr-1 border-r-[10px] border-r-white border-b-[10px] border-b-transparent'
                                 }
                               `} />
 
                               {msg.type === 'text' && (
-                                <p className="text-[13px] font-medium leading-relaxed break-words">{msg.content}</p>
+                                <p className="text-[13px] font-normal leading-relaxed break-words text-[#111b21]">{msg.content}</p>
                               )}
                               
                               {msg.type === 'image' && (
                                 <div className="space-y-2">
                                   <img 
                                     src={msg.media_url} 
-                                    className="max-w-full rounded-xl cursor-pointer hover:opacity-90 transition-all border border-black/10" 
+                                    className="max-w-full rounded-xl cursor-pointer hover:opacity-95 transition-all border border-black/10" 
                                     onClick={() => window.open(msg.media_url)} 
+                                    alt=""
                                   />
                                 </div>
                               )}
                               
                               {msg.type === 'audio' && (
-                                <AudioPlayer src={msg.media_url || ''} isMe={isMe} />
+                                <AudioPlayer src={msg.media_url || msg.content || ''} isMe={isMe} />
                               )}
 
-                              <div className={`flex justify-end items-center gap-1 mt-1 opacity-40`}>
-                                <span className="text-[8px] font-black uppercase">{format(new Date(msg.created_at), 'HH:mm')}</span>
-                                {isMe && <div className="w-2 h-2 rounded-full border border-current opacity-50" />}
+                              <div className="flex justify-end items-center gap-1 mt-1 opacity-60 text-[#667781]">
+                                <span className="text-[9px] font-semibold">{format(new Date(msg.created_at), 'HH:mm')}</span>
+                                {isMe && (
+                                  <span className="text-[9px] text-[#53bdeb] font-bold">✓✓</span>
+                                )}
                               </div>
                             </div>
 
@@ -833,7 +949,7 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                                 <button 
                                   key={emoji}
                                   onClick={() => addReaction(msg.id, emoji)}
-                                  className="w-7 h-7 bg-[#0a0e17] border border-white/10 rounded-full flex items-center justify-center hover:scale-125 transition-all text-xs shadow-2xl"
+                                  className="w-7 h-7 bg-white border border-slate-200 rounded-full flex items-center justify-center hover:scale-125 transition-all text-xs shadow-md"
                                 >
                                   {emoji}
                                 </button>
@@ -845,15 +961,15 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                           {msgReactions.length > 0 && (
                             <div className={`flex flex-wrap gap-1 mt-1 ${isMe ? 'flex-row-reverse' : ''}`}>
                               {Array.from(new Set(msgReactions.map(r => r.emoji))).map(emoji => (
-                                <div key={emoji} className="bg-white/5 px-2 py-0.5 rounded-full text-[9px] flex items-center gap-1 border border-white/5 backdrop-blur-md">
+                                <div key={emoji} className="bg-white/95 px-2 py-0.5 rounded-full text-[9px] flex items-center gap-1 border border-slate-200 shadow-sm">
                                   <span>{emoji}</span>
-                                  <span className="font-black text-[#d4af37]">{msgReactions.filter(r => r.emoji === emoji).length}</span>
+                                  <span className="font-black text-[#075e54]">{msgReactions.filter(r => r.emoji === emoji).length}</span>
                                 </div>
                               ))}
                             </div>
                           )}
                         </div>
-                      </>
+                      </div>
                     )}
                   </div>
                 );
@@ -861,66 +977,113 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
             </div>
 
             {/* Input Bar - Immersive */}
-            <div className="p-4 bg-[#1c2431]/95 backdrop-blur-xl border-t border-white/5 relative z-10 safe-area-bottom pb-8">
-              {audioBlob && (
-                <div className="mb-4 p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-center justify-between animate-in slide-in-from-bottom-2 duration-300">
-                  <div className="flex items-center gap-3 text-amber-500">
-                    <div className="w-8 h-8 rounded-full bg-amber-500/20 flex items-center justify-center animate-pulse">
-                      <Mic size={16} />
-                    </div>
-                    <span className="text-[10px] font-black uppercase tracking-widest">Áudio Gravado</span>
+            <div className="p-3.5 bg-[#f0f2f5] border-t border-slate-200 relative z-10 safe-area-bottom pb-8">
+              {audioBlob && audioPreviewUrl && (
+                <div className="mb-3 p-3 bg-white border border-slate-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in slide-in-from-bottom-2 duration-300 shadow-sm">
+                  <div className="flex-1">
+                    <AudioPlayer src={audioPreviewUrl} isMe={true} recordedDuration={recordingTime} />
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => setAudioBlob(null)} className="p-2 text-white/20 hover:text-red-500 transition-colors"><X size={20} /></button>
-                    <button onClick={sendAudio} className="px-6 py-2 bg-amber-500 text-black rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-amber-500/20 active:scale-95 transition-all">Enviar Áudio</button>
+                  <div className="flex items-center justify-end gap-2 shrink-0">
+                    <button 
+                      onClick={() => {
+                        if (audioPreviewUrl) {
+                          URL.revokeObjectURL(audioPreviewUrl);
+                          setAudioPreviewUrl(null);
+                        }
+                        setAudioBlob(null);
+                      }} 
+                      className="p-2.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+                      title="Excluir gravação"
+                    >
+                      <Trash2 size={20} />
+                    </button>
+                    <button 
+                      onClick={sendAudio} 
+                      className="px-5 py-2.5 bg-[#00a884] text-white rounded-xl text-xs font-bold uppercase tracking-widest shadow-md hover:bg-[#008f6f] active:scale-95 transition-all"
+                    >
+                      Enviar Áudio
+                    </button>
                   </div>
                 </div>
               )}
               
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-1">
-                  <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-10 h-10 flex items-center justify-center text-white/40 hover:text-[#d4af37] transition-all"
-                  >
-                    <Plus size={24} />
-                  </button>
-                  <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleImageUpload} />
+              {isRecording ? (
+                <div className="p-2 bg-red-50 border border-red-200 rounded-2xl flex items-center justify-between gap-3 animate-pulse">
+                  <div className="flex items-center gap-2.5 text-red-600 font-bold text-xs px-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping inline-block shrink-0" />
+                    <span className="tracking-wide">Gravando áudio... {Math.floor(recordingTime / 60)}:{(recordingTime % 60).toString().padStart(2, '0')}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        stopRecording();
+                        if (audioPreviewUrl) {
+                          URL.revokeObjectURL(audioPreviewUrl);
+                          setAudioPreviewUrl(null);
+                        }
+                        setAudioBlob(null);
+                      }}
+                      className="px-3 py-1.5 text-slate-600 hover:text-red-600 bg-white rounded-xl border border-slate-200 text-xs font-semibold shadow-sm flex items-center gap-1 active:scale-95 transition-all"
+                    >
+                      <Trash2 size={13} />
+                      <span>Cancelar</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopRecording}
+                      className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 active:scale-95 transition-all"
+                    >
+                      <Square size={12} fill="currentColor" />
+                      <span>Concluir</span>
+                    </button>
+                  </div>
                 </div>
-                
-                <div className="flex-1 relative">
-                  <input 
-                    type="text" 
-                    value={newMessage}
-                    onChange={(e) => setNewMessage(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                    placeholder="Aa"
-                    className="w-full bg-[#0a0e17] border border-white/5 rounded-2xl py-3 px-5 pr-12 text-sm font-medium text-white outline-none focus:ring-1 focus:ring-[#d4af37]/50 shadow-inner transition-all"
-                  />
-                  <button className="absolute right-3 top-1/2 -translate-y-1/2 text-white/20 hover:text-[#d4af37] transition-colors">
-                    <Smile size={22} />
-                  </button>
-                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
+                    <button 
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-10 h-10 flex items-center justify-center text-slate-500 hover:text-[#075e54] transition-all bg-white rounded-full shadow-sm border border-slate-200"
+                    >
+                      <Plus size={20} />
+                    </button>
+                    <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleImageUpload} />
+                  </div>
+                  
+                  <div className="flex-1 relative">
+                    <input 
+                      type="text" 
+                      value={newMessage}
+                      onChange={(e) => setNewMessage(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                      placeholder="Mensagem"
+                      className="w-full bg-white border border-slate-200 rounded-full py-3 px-5 pr-12 text-sm font-normal text-slate-900 outline-none focus:ring-1 focus:ring-[#00a884] shadow-sm transition-all placeholder:text-slate-400"
+                    />
+                    <button className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#075e54] transition-colors">
+                      <Smile size={20} />
+                    </button>
+                  </div>
 
-                {newMessage.trim() ? (
-                  <button 
-                    onClick={() => handleSendMessage()}
-                    className="w-11 h-11 bg-[#d4af37] text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg shadow-[#d4af37]/20"
-                  >
-                    <Send size={20} className="ml-0.5" />
-                  </button>
-                ) : (
-                  <button 
-                    onMouseDown={startRecording}
-                    onMouseUp={stopRecording}
-                    onTouchStart={startRecording}
-                    onTouchEnd={stopRecording}
-                    className={`w-11 h-11 rounded-full flex items-center justify-center transition-all shadow-lg ${isRecording ? 'bg-red-500 animate-pulse scale-125 shadow-red-500/40' : 'bg-white/5 text-white/40 hover:text-[#d4af37]'}`}
-                  >
-                    <Mic size={22} />
-                  </button>
-                )}
-              </div>
+                  {newMessage.trim() ? (
+                    <button 
+                      onClick={() => handleSendMessage()}
+                      className="w-11 h-11 bg-[#00a884] text-white rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-md shadow-[#00a884]/30"
+                    >
+                      <Send size={18} className="ml-0.5" />
+                    </button>
+                  ) : (
+                    <button 
+                      type="button"
+                      onClick={startRecording}
+                      className="w-11 h-11 rounded-full flex items-center justify-center transition-all shadow-sm bg-[#00a884] text-white hover:bg-[#008f6f] active:scale-95"
+                      title="Toque para gravar áudio"
+                    >
+                      <Mic size={20} />
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </motion.div>
         )}
@@ -1154,7 +1317,10 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
               </div>
 
               <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
-                <h5 className="text-[10px] font-black text-white/20 uppercase tracking-[0.2em] mb-4">Lista de Membros</h5>
+                <div className="flex items-center justify-between">
+                  <h5 className="text-[10px] font-black text-white/40 uppercase tracking-[0.2em]">Lista de Membros</h5>
+                  <span className="text-[10px] font-black text-[#d4af37] uppercase tracking-widest">{groupMembers.length} Participantes</span>
+                </div>
                 {groupMembers.map((member) => (
                   <div key={member.id} className="flex items-center justify-between p-3 bg-black/20 rounded-2xl border border-white/5">
                     <div className="flex items-center gap-3">
@@ -1179,12 +1345,29 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                 ))}
               </div>
 
-              <button 
-                onClick={() => setShowGroupInfo(false)}
-                className="w-full py-5 bg-white/5 hover:bg-white/10 text-white rounded-2xl font-black uppercase text-[10px] tracking-[0.2em] transition-all"
-              >
-                Voltar
-              </button>
+              <div className="space-y-3 pt-2">
+                {selectedGroup.created_by !== currentUserId ? (
+                  <button 
+                    onClick={leaveGroup}
+                    className="w-full py-4 bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/20 rounded-2xl font-black uppercase text-[10px] tracking-[0.2em] transition-all flex items-center justify-center gap-2 shadow-lg"
+                  >
+                    <LogOut size={16} />
+                    Sair do Grupo
+                  </button>
+                ) : (
+                  <div className="p-3 bg-[#d4af37]/10 rounded-2xl border border-[#d4af37]/20 text-center">
+                    <p className="text-[10px] font-black text-[#d4af37] uppercase tracking-widest">
+                      Você é o Administrador deste grupo
+                    </p>
+                  </div>
+                )}
+                <button 
+                  onClick={() => setShowGroupInfo(false)}
+                  className="w-full py-4 bg-white/5 hover:bg-white/10 text-white rounded-2xl font-black uppercase text-[10px] tracking-[0.2em] transition-all"
+                >
+                  Voltar
+                </button>
+              </div>
             </motion.div>
           </motion.div>
         )}

@@ -10,8 +10,13 @@ import WeeklyChart from './components/WeeklyChart';
 import AnimatedLogo from './components/AnimatedLogo';
 import ClockMarking from './components/ClockMarking';
 import AnnouncementBoard from './components/AnnouncementBoard';
+import SocialFeed from './components/SocialFeed';
+import ReelsView from './components/ReelsView';
 import Messenger from './components/Messenger';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import FCMPushModal from './components/FCMPushModal';
+import { registerFCMServiceWorker, setupForegroundMessageListener, requestFCMToken } from './services/firebaseMessaging';
+import { playNotificationSound, startIncomingCallRingtone, stopIncomingCallRingtone } from './lib/sounds';
 import { getGamificationStats } from './lib/gamification';
 import { 
   Plus, 
@@ -23,21 +28,29 @@ import {
   FileText, 
   User, 
   Users, 
-  Settings,
-  Briefcase,
-  Home,
-  Sun,
-  Moon,
-  Zap,
-  Bell,
-  TrendingUp,
-  MessageCircle,
-  Heart,
-  Phone
+  Settings, 
+  Briefcase, 
+  Home, 
+  Sun, 
+  Moon, 
+  Zap, 
+  Bell, 
+  Film, 
+  TrendingUp, 
+  MessageCircle, 
+  Heart, 
+  Phone,
+  PhoneCall,
+  PhoneOff,
+  MessageSquare,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+import { Capacitor } from '@capacitor/core';
+import { StatusBar, Style } from '@capacitor/status-bar';
+import { App as CapApp } from '@capacitor/app';
 
 export default function App() {
   const [session, setSession] = useState<any>(null);
@@ -62,6 +75,178 @@ export default function App() {
   const [onlineUsers, setOnlineUsers] = useState<Map<string, any>>(new Map());
   const [isMessengerOpen, setIsMessengerOpen] = useState(false);
   const [isImmersive, setIsImmersive] = useState(false);
+  const [isFCMModalOpen, setIsFCMModalOpen] = useState(false);
+  const [fcmRegistered, setFcmRegistered] = useState(!!localStorage.getItem('gsi_fcm_token'));
+  const [incomingCallSignal, setIncomingCallSignal] = useState<any>(null);
+  const [incomingCallBanner, setIncomingCallBanner] = useState<any>(null);
+  const [incomingMessageToast, setIncomingMessageToast] = useState<{ senderId: string; senderName: string; senderAvatar?: string; content: string } | null>(null);
+  const [unreadMsgCount, setUnreadMsgCount] = useState<number>(0);
+
+  // Auto-register device for Web Push / FCM notifications upon login
+  useEffect(() => {
+    if (session?.user?.id) {
+      requestFCMToken(session.user.id).then(token => {
+        if (token) setFcmRegistered(true);
+      });
+    }
+  }, [session?.user?.id]);
+
+  // Native Android Capacitor Lifecycle (Back button & Status Bar)
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      StatusBar.setBackgroundColor({ color: '#0a0e17' }).catch(() => {});
+      StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
+
+      let removeListener: (() => void) | undefined;
+      CapApp.addListener('backButton', ({ canGoBack }) => {
+        if (incomingCallBanner) {
+          stopIncomingCallRingtone();
+          setIncomingCallBanner(null);
+        } else if (isMessengerOpen) {
+          setIsMessengerOpen(false);
+        } else if (isFCMModalOpen) {
+          setIsFCMModalOpen(false);
+        } else if (activeTab !== 'home') {
+          setActiveTab('home');
+        } else if (canGoBack) {
+          window.history.back();
+        } else {
+          CapApp.exitApp();
+        }
+      }).then(handle => {
+        removeListener = () => handle.remove();
+      }).catch(() => {});
+
+      return () => {
+        if (removeListener) removeListener();
+      };
+    }
+  }, [incomingCallBanner, isMessengerOpen, isFCMModalOpen, activeTab]);
+
+  // Global WebRTC calling listener: plays loud ringtone, vibrates phone and displays call modal
+  useEffect(() => {
+    if (!session?.user?.id) return;
+
+    const callChannel = supabase.channel(`call-signals-${session.user.id}`);
+    
+    callChannel
+      .on('broadcast', { event: 'signal' }, ({ payload }) => {
+        if (payload?.type === 'incoming-call') {
+          console.log('[App Call Listener] Received global call signal:', payload);
+          setIncomingCallSignal(payload);
+          setIncomingCallBanner(payload);
+          startIncomingCallRingtone();
+          if (navigator.vibrate) navigator.vibrate([500, 250, 500, 250, 500]);
+
+          // Trigger native notification if browser is in background
+          if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+            new Notification(`📞 Chamada de ${payload.senderName || 'Colega de Obra'}`, {
+              body: `Chamada de ${payload.callType === 'video' ? 'vídeo' : 'voz'} no GSI Pro...`,
+              icon: payload.senderAvatar || '/icons/icon-192.png',
+              tag: 'incoming-call',
+              requireInteraction: true
+            });
+          }
+        } else if (payload?.type === 'call-declined' || payload?.type === 'hangup' || payload?.type === 'call-ended') {
+          stopIncomingCallRingtone();
+          setIncomingCallBanner(null);
+        }
+      })
+      .subscribe();
+
+    // Global listener for incoming direct messages when Messenger modal is closed
+    const msgChannel = supabase.channel(`global-messages-${session.user.id}`);
+    msgChannel
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `receiver_id=eq.${session.user.id}`
+      }, (payload) => {
+        const msg = payload.new as any;
+        console.log('[App Message Listener] Incoming message:', msg);
+        if (!isMessengerOpen) {
+          playNotificationSound();
+          setUnreadMsgCount(prev => prev + 1);
+
+          const sProfile = onlineUsers.get(msg.sender_id);
+          const sName = sProfile?.full_name || 'Colega de Obra';
+          const sAvatar = sProfile?.avatar_url;
+
+          setIncomingMessageToast({
+            senderId: msg.sender_id,
+            senderName: sName,
+            senderAvatar: sAvatar,
+            content: msg.type === 'audio' ? '🎵 Mensagem de áudio' : (msg.type === 'image' ? '📷 Foto' : (msg.content || 'Nova mensagem'))
+          });
+
+          if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+            new Notification(`💬 ${sName}`, {
+              body: msg.content || 'Nova mensagem recebida',
+              icon: sAvatar || '/icons/icon-192.png',
+              tag: `msg-${msg.sender_id}`
+            });
+          }
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(callChannel);
+      supabase.removeChannel(msgChannel);
+    };
+  }, [session, isMessengerOpen, onlineUsers]);
+
+  // Handle URL launch parameters and Service Worker messages
+  useEffect(() => {
+    registerFCMServiceWorker();
+
+    setupForegroundMessageListener((payload) => {
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 5000);
+    });
+
+    if (typeof window !== 'undefined') {
+      // Check if launched from a push notification click with query params
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get('incomingCall') === 'true') {
+        const callerSignal = {
+          type: 'incoming-call',
+          senderId: urlParams.get('callerId') || '',
+          senderName: urlParams.get('callerName') || 'Colega',
+          senderAvatar: urlParams.get('callerAvatar') || '',
+          callType: urlParams.get('callType') || 'video'
+        };
+        setIncomingCallSignal(callerSignal);
+        setIncomingCallBanner(callerSignal);
+        startIncomingCallRingtone();
+        window.history.replaceState({}, '', '/');
+      } else if (urlParams.get('openMessenger') === 'true') {
+        setIsMessengerOpen(true);
+        window.history.replaceState({}, '', '/');
+      }
+
+      // Listen for messages from the service worker
+      if ('serviceWorker' in navigator) {
+        const handler = (event: MessageEvent) => {
+          if (event.data?.type === 'NAVIGATE_TO_PONTO') {
+            setActiveTab('ponto');
+          } else if (event.data?.type === 'INCOMING_CALL_NOTIFICATION') {
+            const payload = event.data.payload;
+            setIncomingCallSignal(payload);
+            setIncomingCallBanner(payload);
+            startIncomingCallRingtone();
+          } else if (event.data?.type === 'OPEN_MESSENGER_CHAT') {
+            setIsMessengerOpen(true);
+          }
+        };
+        navigator.serviceWorker.addEventListener('message', handler);
+        return () => {
+          navigator.serviceWorker.removeEventListener('message', handler);
+        };
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (!session?.user?.id) return;
@@ -531,11 +716,31 @@ export default function App() {
           <div className="flex items-center gap-3">
             <PWAInstallButton />
             <button 
-              onClick={() => setIsMessengerOpen(true)}
+              onClick={() => setIsFCMModalOpen(true)}
+              className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center bg-white/5 hover:bg-[#d4af37]/15 transition-all relative group"
+              title="Alertas de Ponto Push (Firebase FCM)"
+            >
+              <Bell size={18} className="text-[#d4af37] group-hover:scale-110 transition-transform" />
+              {fcmRegistered && (
+                <div className="absolute top-1 right-1 w-2.5 h-2.5 bg-green-500 rounded-full border border-[#0a0e17]" />
+              )}
+            </button>
+            <button 
+              onClick={() => {
+                setIsMessengerOpen(true);
+                setUnreadMsgCount(0);
+              }}
               className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center bg-white/5 hover:bg-white/10 transition-all relative"
+              title="Chat & Mensagens"
             >
               <Zap size={18} className="text-[#d4af37] fill-[#d4af37]/20" />
-              <div className="absolute -top-1 -right-1 w-3 h-3 bg-[#0084ff] border-2 border-[#0a0e17] rounded-full animate-pulse" />
+              {unreadMsgCount > 0 ? (
+                <div className="absolute -top-1.5 -right-1.5 min-w-[20px] h-5 px-1.5 bg-red-500 text-white font-black text-[10px] rounded-full flex items-center justify-center animate-bounce shadow-lg shadow-red-500/40 border border-[#0a0e17]">
+                  {unreadMsgCount}
+                </div>
+              ) : (
+                <div className="absolute -top-1 -right-1 w-3 h-3 bg-[#0084ff] border-2 border-[#0a0e17] rounded-full animate-pulse" />
+              )}
             </button>
           </div>
         </header>
@@ -618,12 +823,29 @@ export default function App() {
                 userName={userName}
               />
 
-              {/* Team Section */}
-              <Society 
-                isDarkMode={true} 
-                onlineUsers={onlineUsers} 
+              {/* Social Feed Section */}
+              <SocialFeed 
+                currentUserId={session.user.id}
+                userName={userName}
+                userRole={userRole}
                 userAvatar={profile?.avatar_url}
-                onToggleImmersive={(open) => setIsImmersive(open)}
+                isAdmin={profile?.is_admin || false}
+              />
+            </motion.div>
+          )}
+
+          {activeTab === 'reels' && (
+            <motion.div
+              key="reels"
+              initial={{ opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+            >
+              <ReelsView 
+                currentUserId={session.user.id} 
+                userName={userName} 
+                userAvatar={profile?.avatar_url}
+                isAdmin={profile?.is_admin || false}
               />
             </motion.div>
           )}
@@ -695,11 +917,11 @@ export default function App() {
             <span className="text-[7px] font-black uppercase tracking-widest">Home</span>
           </button>
           <button 
-            onClick={() => setActiveTab('alerts')}
-            className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'alerts' ? 'text-[#d4af37] scale-110' : 'text-white/30'}`}
+            onClick={() => setActiveTab('reels')}
+            className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'reels' ? 'text-[#d4af37] scale-110' : 'text-white/30'}`}
           >
-            <Bell size={22} />
-            <span className="text-[7px] font-black uppercase tracking-widest">Alertas</span>
+            <Film size={22} className={activeTab === 'reels' ? 'fill-[#d4af37]/20' : ''} />
+            <span className="text-[7px] font-black uppercase tracking-widest">Reels</span>
           </button>
           <button 
             onClick={() => setActiveTab('ponto')}
@@ -749,11 +971,146 @@ export default function App() {
         {isMessengerOpen && session && (
           <Messenger 
             currentUserId={session.user.id} 
+            userName={userName}
+            userAvatar={profile?.avatar_url}
             onClose={() => setIsMessengerOpen(false)} 
             onlineUsers={onlineUsers}
+            incomingCallSignal={incomingCallSignal}
+            onClearIncomingCallSignal={() => setIncomingCallSignal(null)}
           />
         )}
       </AnimatePresence>
+
+      {/* Incoming Call Overlay Modal */}
+      <AnimatePresence>
+        {incomingCallBanner && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/90 backdrop-blur-xl"
+          >
+            <div className="w-full max-w-sm bg-[#1c2431] border border-white/10 rounded-[3rem] p-8 text-center space-y-6 shadow-2xl relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 via-[#d4af37] to-emerald-500 animate-pulse" />
+
+              <div className="relative mx-auto w-28 h-28">
+                <div className="absolute inset-0 rounded-full bg-emerald-500/20 animate-ping" />
+                <div className="w-28 h-28 rounded-full border-4 border-emerald-400 overflow-hidden bg-black/60 shadow-xl relative z-10 flex items-center justify-center">
+                  {incomingCallBanner.senderAvatar ? (
+                    <img src={incomingCallBanner.senderAvatar} className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-3xl font-black text-white">
+                      {(incomingCallBanner.senderName || 'U').charAt(0).toUpperCase()}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <h3 className="text-xl font-black text-white tracking-wide">
+                  {incomingCallBanner.senderName || 'Colega de Obra'}
+                </h3>
+                <p className="text-xs font-bold text-emerald-400 uppercase tracking-widest flex items-center justify-center gap-1.5 animate-pulse">
+                  <PhoneCall size={14} />
+                  Chamada de {incomingCallBanner.callType === 'video' ? 'Vídeo' : 'Voz'} a receber...
+                </p>
+              </div>
+
+              {/* Action Buttons: Atender / Recusar */}
+              <div className="flex items-center justify-center gap-6 pt-2">
+                {/* Recusar (Decline) */}
+                <button
+                  onClick={() => {
+                    stopIncomingCallRingtone();
+                    if (incomingCallBanner?.senderId) {
+                      const ch = supabase.channel(`call-signals-${incomingCallBanner.senderId}`);
+                      ch.subscribe((st) => {
+                        if (st === 'SUBSCRIBED') {
+                          ch.send({ type: 'broadcast', event: 'signal', payload: { type: 'call-declined', senderId: session?.user?.id } });
+                          setTimeout(() => supabase.removeChannel(ch), 500);
+                        }
+                      });
+                    }
+                    setIncomingCallBanner(null);
+                    setIncomingCallSignal(null);
+                  }}
+                  className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-lg shadow-red-500/40 hover:scale-105 active:scale-95 transition-all"
+                  title="Recusar"
+                >
+                  <PhoneOff size={28} />
+                </button>
+
+                {/* Atender (Answer) */}
+                <button
+                  onClick={() => {
+                    stopIncomingCallRingtone();
+                    setIncomingCallBanner(null);
+                    setIsMessengerOpen(true);
+                  }}
+                  className="w-20 h-20 rounded-full bg-emerald-500 hover:bg-emerald-400 text-black flex items-center justify-center shadow-xl shadow-emerald-500/50 hover:scale-105 active:scale-95 transition-all animate-bounce"
+                  title="Atender"
+                >
+                  <Phone size={34} className="fill-black" />
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Incoming Message Toast Banner */}
+      <AnimatePresence>
+        {incomingMessageToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -60 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -60 }}
+            onClick={() => {
+              setIsMessengerOpen(true);
+              setIncomingMessageToast(null);
+              setUnreadMsgCount(0);
+            }}
+            className="fixed top-5 left-1/2 -translate-x-1/2 z-[150] w-[92%] max-w-md bg-[#1c2431]/95 border border-[#d4af37]/40 shadow-2xl shadow-black/80 rounded-2xl p-3.5 flex items-center gap-3 backdrop-blur-xl cursor-pointer hover:border-[#d4af37] transition-all"
+          >
+            <div className="w-10 h-10 rounded-full overflow-hidden border border-[#d4af37] bg-black/50 flex items-center justify-center flex-shrink-0">
+              {incomingMessageToast.senderAvatar ? (
+                <img src={incomingMessageToast.senderAvatar} className="w-full h-full object-cover" />
+              ) : (
+                <span className="text-white text-xs font-black">
+                  {incomingMessageToast.senderName.charAt(0).toUpperCase()}
+                </span>
+              )}
+            </div>
+
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-black text-white truncate">{incomingMessageToast.senderName}</span>
+                <span className="text-[9px] font-bold text-[#d4af37] uppercase">Agora</span>
+              </div>
+              <p className="text-xs text-white/80 truncate mt-0.5">{incomingMessageToast.content}</p>
+            </div>
+
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setIncomingMessageToast(null);
+              }}
+              className="p-1.5 text-white/40 hover:text-white transition-colors"
+            >
+              <X size={16} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <FCMPushModal 
+        isOpen={isFCMModalOpen}
+        onClose={() => {
+          setIsFCMModalOpen(false);
+          setFcmRegistered(!!localStorage.getItem('gsi_fcm_token'));
+        }}
+        userId={session?.user?.id || ''}
+      />
 
       <AnimatePresence>
         {showToast && (

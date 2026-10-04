@@ -236,75 +236,111 @@ export default function Society({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md"
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md"
             onClick={() => setSelectedProfile(null)}
           >
             <motion.div
-              initial={{ scale: 0.9, y: 20 }}
+              initial={{ scale: 0.95, y: 30 }}
               animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.9, y: 20 }}
-              className={`w-full max-w-2xl border rounded-[2.5rem] overflow-hidden max-h-[90vh] flex flex-col ${isDarkMode ? 'bg-[#0f172a] border-slate-800' : 'bg-white border-slate-200 shadow-2xl'}`}
+              exit={{ scale: 0.95, y: 30 }}
+              className={`w-full max-w-xl border rounded-[2.5rem] overflow-hidden max-h-[90vh] flex flex-col ${isDarkMode ? 'bg-[#0a0e17] border-white/10' : 'bg-white border-slate-200 shadow-2xl'}`}
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="relative h-48 bg-gradient-to-r from-blue-900 to-blue-600">
+              {/* Premium Carbon / Slate Header with Gold Highlight */}
+              <div className="relative h-48 bg-gradient-to-br from-[#1c2431] via-[#0f172a] to-[#0a0e17] border-b border-white/5 flex items-end">
+                {/* Close Button in Gold theme */}
                 <button 
                   onClick={() => setSelectedProfile(null)}
-                  className="absolute top-6 right-6 w-10 h-10 bg-black/20 hover:bg-black/40 text-white rounded-full flex items-center justify-center backdrop-blur-md transition-all z-30"
+                  className="absolute top-6 right-6 w-11 h-11 bg-white/5 border border-white/10 hover:border-[#d4af37]/50 hover:bg-[#d4af37]/20 text-[#d4af37] rounded-full flex items-center justify-center backdrop-blur-md transition-all duration-300 z-30"
+                  title="Fechar"
                 >
-                  <Plus size={24} className="rotate-45" />
+                  <Plus size={22} className="rotate-45" />
                 </button>
-                <div className="absolute -bottom-16 left-10 flex items-end gap-6 z-20">
-                  <div className={`w-32 h-32 rounded-[2rem] border-4 overflow-hidden shadow-2xl ${isDarkMode ? 'bg-slate-900 border-[#0f172a]' : 'bg-slate-50 border-white'}`}>
+
+                {/* Profile Image & Role section */}
+                <div className="absolute -bottom-16 left-8 flex items-end gap-5 z-20">
+                  <div className={`w-32 h-32 rounded-3xl border-4 overflow-hidden shadow-2xl transition-transform duration-500 hover:scale-105 ${isDarkMode ? 'bg-[#0a0e17] border-[#d4af37]' : 'bg-slate-50 border-[#d4af37]'}`}>
                     {selectedProfile.avatar_url ? (
                       <img src={selectedProfile.avatar_url} className="w-full h-full object-cover" />
                     ) : (
-                      <div className={`w-full h-full flex items-center justify-center ${isDarkMode ? 'bg-slate-900' : 'bg-slate-100'}`}><User size={48} className={isDarkMode ? 'text-slate-800' : 'text-slate-200'} /></div>
+                      <div className={`w-full h-full flex items-center justify-center ${isDarkMode ? 'bg-[#1c2431]' : 'bg-slate-100'}`}>
+                        <User size={48} className={isDarkMode ? 'text-slate-700' : 'text-slate-300'} />
+                      </div>
                     )}
                   </div>
-                  <div className="mb-6">
-                    <h3 className={`text-3xl font-black uppercase tracking-tight ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>{selectedProfile.full_name}</h3>
-                    <p className="text-blue-300 font-bold uppercase tracking-widest text-xs">{selectedProfile.role}</p>
+                  <div className="mb-4">
+                    <h3 className={`text-2xl font-black uppercase tracking-tight leading-none ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                      {selectedProfile.full_name}
+                    </h3>
+                    <p className="text-[#d4af37] font-black uppercase tracking-[0.2em] text-[10px] mt-2 flex items-center gap-1.5">
+                      <Star size={11} className="fill-current" /> {selectedProfile.role}
+                    </p>
                   </div>
                 </div>
               </div>
 
-              <div className="pt-20 p-10 overflow-y-auto space-y-10">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className={`p-6 ${isDarkMode ? 'bg-slate-900/50' : 'bg-slate-50'} rounded-3xl border ${isDarkMode ? 'border-slate-800' : 'border-slate-200'} flex items-center gap-4`}>
-                    <div className="p-3 bg-blue-600/10 rounded-2xl text-blue-600"><Phone size={20} /></div>
+              {/* Modal Body */}
+              <div className="pt-20 p-8 overflow-y-auto space-y-8 custom-scrollbar">
+                {/* Contact and Rate Details (Premium Row) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Contact Card */}
+                  <div className={`p-5 ${isDarkMode ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50 border-slate-200'} rounded-2xl border flex items-center gap-4 transition-all duration-300 hover:bg-white/[0.04]`}>
+                    <div className="p-3 bg-[#d4af37]/10 border border-[#d4af37]/20 rounded-xl text-[#d4af37]">
+                      <Phone size={18} />
+                    </div>
                     <div>
-                      <p className={`text-[10px] font-black uppercase tracking-widest ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>Contacto</p>
-                      <p className={`text-sm font-bold ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>{selectedProfile.phone || 'Privado'}</p>
+                      <p className={`text-[9px] font-black uppercase tracking-widest ${isDarkMode ? 'text-white/40' : 'text-slate-400'}`}>Contacto</p>
+                      <p className={`text-xs font-black mt-0.5 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{selectedProfile.phone || 'Privado'}</p>
                     </div>
                   </div>
-                  <div className={`p-6 ${isDarkMode ? 'bg-slate-900/50' : 'bg-slate-50'} rounded-3xl border ${isDarkMode ? 'border-slate-800' : 'border-slate-200'} flex items-center gap-4`}>
-                    <div className="p-3 bg-blue-600/10 rounded-2xl text-blue-600"><Clock size={20} /></div>
+
+                  {/* Hourly Rate Card */}
+                  <div className={`p-5 ${isDarkMode ? 'bg-white/[0.02] border-white/5' : 'bg-slate-50 border-slate-200'} rounded-2xl border flex items-center gap-4 transition-all duration-300 hover:bg-white/[0.04]`}>
+                    <div className="p-3 bg-[#d4af37]/10 border border-[#d4af37]/20 rounded-xl text-[#d4af37]">
+                      <Clock size={18} />
+                    </div>
                     <div>
-                      <p className={`text-[10px] font-black uppercase tracking-widest ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>Taxa Horária</p>
-                      <p className={`text-sm font-bold ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>€{selectedProfile.hourly_rate?.toFixed(2)} <span className="text-[10px] opacity-40 ml-1">EUR</span></p>
+                      <p className={`text-[9px] font-black uppercase tracking-widest ${isDarkMode ? 'text-white/40' : 'text-slate-400'}`}>Taxa Horária</p>
+                      <p className={`text-xs font-black mt-0.5 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                        €{selectedProfile.hourly_rate?.toFixed(2)} <span className="text-[10px] text-white/30 ml-0.5 font-bold">EUR</span>
+                      </p>
                     </div>
                   </div>
                 </div>
 
-                <div className="space-y-6">
-                  <h4 className={`text-xs font-black uppercase tracking-widest flex items-center gap-2 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                    <Calendar size={14} className="text-blue-600" /> Atividade Mensal Recente
+                {/* Activity List Section */}
+                <div className="space-y-4">
+                  <h4 className={`text-[10px] font-black uppercase tracking-[0.25em] flex items-center gap-2 ${isDarkMode ? 'text-white/40' : 'text-slate-400'}`}>
+                    <Calendar size={13} className="text-[#d4af37]" /> Atividade Mensal Recente
                   </h4>
-                  <div className="space-y-3">
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1.5 custom-scrollbar">
                     {workerEntries.map((entry) => (
-                      <div key={entry.id} className={`p-5 border rounded-2xl flex justify-between items-center transition-all ${isDarkMode ? 'bg-slate-900/30 border-slate-800 hover:bg-slate-800/50' : 'bg-white border-slate-100 hover:border-blue-600/20'}`}>
+                      <div 
+                        key={entry.id} 
+                        className={`p-4 border rounded-xl flex justify-between items-center transition-all ${
+                          isDarkMode 
+                            ? 'bg-white/[0.01] border-white/5 hover:bg-white/[0.03]' 
+                            : 'bg-white border-slate-100 hover:border-[#d4af37]/20'
+                        }`}
+                      >
                         <div>
-                          <p className={`text-xs font-black uppercase tracking-widest ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>{entry.day.toString().padStart(2, '0')}/{entry.month + 1}</p>
-                          <p className={`text-[10px] font-bold uppercase mt-1 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>{entry.obra}</p>
+                          <p className={`text-xs font-black uppercase tracking-wider ${isDarkMode ? 'text-white/90' : 'text-slate-900'}`}>
+                            {entry.day.toString().padStart(2, '0')}/{entry.month + 1}
+                          </p>
+                          <p className="text-[9px] font-bold uppercase mt-1 text-[#d4af37] tracking-wider">
+                            {entry.obra}
+                          </p>
                         </div>
                         <div className="text-right">
-                          <p className="text-xl font-black text-blue-600 tracking-tighter tabular-nums">{entry.hours}h</p>
+                          <p className="text-lg font-black text-[#d4af37] tracking-tight tabular-nums">{entry.hours}h</p>
                         </div>
                       </div>
                     ))}
                     {workerEntries.length === 0 && (
-                      <div className={`py-12 text-center rounded-2xl border border-dashed ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
-                        <p className={`font-black text-[10px] uppercase tracking-widest ${isDarkMode ? 'text-slate-700' : 'text-slate-300'}`}>Sem registos este mês</p>
+                      <div className={`py-10 text-center rounded-xl border border-dashed ${isDarkMode ? 'border-white/5' : 'border-slate-200'}`}>
+                        <p className={`font-black text-[9px] uppercase tracking-widest ${isDarkMode ? 'text-white/20' : 'text-slate-300'}`}>
+                          Sem registos este mês
+                        </p>
                       </div>
                     )}
                   </div>

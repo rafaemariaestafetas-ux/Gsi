@@ -33,7 +33,18 @@ export default function Auth() {
         if (error) throw error;
       }
     } catch (err: any) {
-      setError(err.message || 'Erro ao autenticar');
+      const msg = err?.message || '';
+      if (msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('email rate') || msg.toLowerCase().includes('over_email_send_rate_limit')) {
+        setError('Limite de envio de e-mails do Supabase atingido (máx. 3 ou 4 por hora no serviço gratuito de e-mail). Para cadastrar imediatamente sem limite, desative "Confirm email" nas configurações do Supabase.');
+      } else if (msg.toLowerCase().includes('already registered') || msg.toLowerCase().includes('already exists')) {
+        setError('Este e-mail já está cadastrado. Alterne para "Já possui acesso? Entrar" e faça o login.');
+      } else if (msg.toLowerCase().includes('at least 6 characters')) {
+        setError('A palavra-passe deve ter no mínimo 6 caracteres.');
+      } else if (msg.toLowerCase().includes('invalid login credentials')) {
+        setError('E-mail ou palavra-passe incorretos.');
+      } else {
+        setError(msg || 'Erro ao autenticar.');
+      }
     } finally {
       setLoading(false);
     }

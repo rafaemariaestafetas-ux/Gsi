@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">GSI PRO</string>
+    <string name="title_activity_main">GSI PRO</string>
+    <string name="package_name">com.gsipro.app</string>
+    <string name="custom_url_scheme">com.gsipro.app</string>
+</resources>

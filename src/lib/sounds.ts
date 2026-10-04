@@ -62,3 +62,44 @@ export const playNotificationSound = () => {
     playTone(880, now + 0.2, 0.5, 0.05); // A5 second beep
   } catch (e) {}
 };
+
+let ringtoneInterval: any = null;
+
+export const startIncomingCallRingtone = () => {
+  stopIncomingCallRingtone();
+  try {
+    const playRingCycle = () => {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const now = ctx.currentTime;
+      // Phone dual tone: 440Hz + 480Hz
+      const playDualTone = (offset: number, dur: number) => {
+        [440, 480].forEach(freq => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, now + offset);
+          gain.gain.setValueAtTime(0, now + offset);
+          gain.gain.linearRampToValueAtTime(0.12, now + offset + 0.05);
+          gain.gain.setValueAtTime(0.12, now + offset + dur - 0.05);
+          gain.gain.linearRampToValueAtTime(0.001, now + offset + dur);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now + offset);
+          osc.stop(now + offset + dur);
+        });
+      };
+      playDualTone(0, 0.8);
+      playDualTone(1.0, 0.8);
+    };
+
+    playRingCycle();
+    ringtoneInterval = setInterval(playRingCycle, 3200);
+  } catch (e) {}
+};
+
+export const stopIncomingCallRingtone = () => {
+  if (ringtoneInterval) {
+    clearInterval(ringtoneInterval);
+    ringtoneInterval = null;
+  }
+};

@@ -1,0 +1,112 @@
+{
+  "entities": {
+    "FcmToken": {
+      "title": "FCM Token",
+      "description": "User device registration token for Firebase Cloud Messaging push notifications",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Unique identifier of the employee user"
+        },
+        "token": {
+          "type": "string",
+          "description": "FCM device registration push token"
+        },
+        "platform": {
+          "type": "string",
+          "description": "Client platform (web, pwa, mobile)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last token update"
+        }
+      },
+      "required": ["userId", "token", "updatedAt"]
+    },
+    "ShiftReminder": {
+      "title": "Shift Reminder",
+      "description": "Notification reminder schedule for employee clock-in and clock-out",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Unique identifier of the employee"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether push alerts are enabled"
+        },
+        "entryTime": {
+          "type": "string",
+          "description": "Time string in HH:mm format for entry clock-in reminder"
+        },
+        "exitTime": {
+          "type": "string",
+          "description": "Time string in HH:mm format for exit clock-out reminder"
+        },
+        "days": {
+          "type": "string",
+          "description": "Comma-separated list of active reminder days (e.g. 1,2,3,4,5)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["userId", "enabled", "entryTime", "exitTime"]
+    },
+    "FcmNotificationQueue": {
+      "title": "FCM Notification Queue",
+      "description": "Outbound background push notification transactional queue processed by background services or triggers",
+      "type": "object",
+      "properties": {
+        "senderId": {
+          "type": "string"
+        },
+        "senderName": {
+          "type": "string"
+        },
+        "recipientId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        }
+      },
+      "required": ["senderId", "recipientId", "title", "body", "type", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/fcm_tokens/{tokenId}": {
+      "schema": {
+        "$ref": "#/entities/FcmToken"
+      },
+      "description": "Collection of employee device FCM push tokens"
+    },
+    "/shift_reminders/{reminderId}": {
+      "schema": {
+        "$ref": "#/entities/ShiftReminder"
+      },
+      "description": "Collection of employee shift reminder configurations"
+    },
+    "/fcm_notifications_queue/{notificationId}": {
+      "schema": {
+        "$ref": "#/entities/FcmNotificationQueue"
+      },
+      "description": "Transactional background push notification delivery queue"
+    }
+  }
+}

@@ -5,6 +5,7 @@ import { Megaphone, Send, Trash2, Loader2, AlertTriangle, Plus, Bell } from 'luc
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+import { triggerBackgroundNotification } from '../services/firebaseMessaging';
 
 interface AnnouncementBoardProps {
   isAdmin: boolean;
@@ -27,7 +28,7 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
     // Real-time subscription
     const channel = supabase
       .channel('announcements-changes')
-      .on('postgres_changes', { event: 'INSERT', table: 'announcements', schema: 'public' }, (payload) => {
+      .on('postgres_changes' as any, { event: 'INSERT', table: 'announcements', schema: 'public' }, (payload: any) => {
         const newAnn = payload.new as Announcement;
         fetchAnnouncements();
         
@@ -38,7 +39,7 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
             icon: 'https://cdn-icons-png.flaticon.com/512/5977/5977591.png',
             tag: 'announcement',
             vibrate: [200, 100, 200]
-          });
+          } as any);
         }
       })
       .subscribe();
@@ -69,6 +70,8 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
     if (!newContent.trim()) return;
     setIsPosting(true);
     
+    const contentPreview = newContent;
+
     const { error } = await supabase.from('announcements').insert([{
       content: newContent,
       user_id: userId,
@@ -76,6 +79,16 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
     }]);
 
     if (!error) {
+      triggerBackgroundNotification({
+        senderId: userId,
+        senderName: userName,
+        recipientId: 'all',
+        title: 'Novo Aviso GSI! 📢',
+        body: `${userName}: ${contentPreview.substring(0, 100)}${contentPreview.length > 100 ? '...' : ''}`,
+        type: 'announcement',
+        data: { url: '/' }
+      });
+
       setNewContent('');
       setShowEditor(false);
       fetchAnnouncements();

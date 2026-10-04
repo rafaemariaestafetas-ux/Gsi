@@ -1,0 +1,9 @@
+{
+	"appId": "com.gsipro.app",
+	"appName": "GSI PRO",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https",
+		"cleartext": true
+	}
+}

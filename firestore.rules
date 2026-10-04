@@ -1,0 +1,41 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // FCM Device Tokens Collection
+    match /fcm_tokens/{tokenId} {
+      allow read: if isSignedIn() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // Shift Reminders Collection
+    match /shift_reminders/{reminderId} {
+      allow read: if isSignedIn() && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // FCM Notifications Queue Collection
+    match /fcm_notifications_queue/{notificationId} {
+      allow read: if isSignedIn() && (resource == null || resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.senderId == request.auth.uid;
+    }
+  }
+}

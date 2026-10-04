@@ -85,6 +85,18 @@ CREATE TABLE IF NOT EXISTS public.group_messages (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now())
 );
 
+-- 6.5. Mensagens Privadas (Direct/Private Messages)
+CREATE TABLE IF NOT EXISTS public.messages (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  sender_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  receiver_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  content TEXT,
+  type TEXT DEFAULT 'text', -- text, image, audio
+  media_url TEXT,
+  is_read BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now())
+);
+
 -- 7. Reações em Mensagens
 CREATE TABLE IF NOT EXISTS public.message_reactions (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -95,11 +107,22 @@ CREATE TABLE IF NOT EXISTS public.message_reactions (
   UNIQUE(message_id, user_id, emoji)
 );
 
+-- 7.5. Bloqueios de Usuários (Blocked Users)
+CREATE TABLE IF NOT EXISTS public.blocks (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  blocker_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  blocked_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()),
+  UNIQUE(blocker_id, blocked_id)
+);
+
 -- 8. Habilitar RLS para novas tabelas
 ALTER TABLE public.chat_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.group_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.group_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.message_reactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.blocks ENABLE ROW LEVEL SECURITY;
 
 -- 9. Políticas de Segurança (RLS Policies)
 
@@ -161,6 +184,26 @@ CREATE POLICY "Reações visíveis para membros" ON public.message_reactions
 CREATE POLICY "Usuários podem reagir" ON public.message_reactions
   FOR INSERT WITH CHECK (auth.uid() = user_id);
 
+-- Mensagens Privadas (Direct Messages): Usuários podem ver mensagens em que estão envolvidos e enviar as suas próprias
+CREATE POLICY "Mensagens privadas visíveis para participantes" ON public.messages
+  FOR SELECT USING (auth.uid() = sender_id OR auth.uid() = receiver_id);
+
+CREATE POLICY "Usuários podem enviar mensagens privadas" ON public.messages
+  FOR INSERT WITH CHECK (auth.uid() = sender_id);
+
+CREATE POLICY "Usuários podem atualizar mensagens privadas" ON public.messages
+  FOR UPDATE USING (auth.uid() = sender_id OR auth.uid() = receiver_id);
+
+-- Bloqueios (Blocks)
+CREATE POLICY "Visualizar bloqueios" ON public.blocks
+  FOR SELECT USING (auth.uid() = blocker_id OR auth.uid() = blocked_id);
+
+CREATE POLICY "Criar bloqueio" ON public.blocks
+  FOR INSERT WITH CHECK (auth.uid() = blocker_id);
+
+CREATE POLICY "Remover bloqueio" ON public.blocks
+  FOR DELETE USING (auth.uid() = blocker_id);
+
 -- 10. Trigger para atualizar updated_at automaticamente
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -174,3 +217,23 @@ CREATE TRIGGER update_profiles_updated_at
     BEFORE UPDATE ON public.profiles
     FOR EACH ROW
     EXECUTE PROCEDURE update_updated_at_column();
+
+-- 11. Tabela de Tokens de Notificação Push (FCM / PWA)
+CREATE TABLE IF NOT EXISTS public.user_push_tokens (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
+  token TEXT NOT NULL,
+  platform TEXT DEFAULT 'pwa',
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()),
+  UNIQUE(user_id, token)
+);
+
+ALTER TABLE public.user_push_tokens ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Usuários podem gerenciar seus tokens" ON public.user_push_tokens
+  FOR ALL USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Leitura de tokens para notificações" ON public.user_push_tokens
+  FOR SELECT USING (auth.role() = 'authenticated');
+
