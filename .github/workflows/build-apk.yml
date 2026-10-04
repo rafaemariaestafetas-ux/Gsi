@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: 'Tipo de Compilação do APK'
+        description: 'Tipo de Compilação do APK (debug ou release)'
         required: true
         default: 'debug'
         type: choice
@@ -17,7 +17,7 @@ on:
           - release
 
 jobs:
-  build:
+  build-apk:
     name: Compilar APK Android
     runs-on: ubuntu-latest
 
@@ -31,19 +31,10 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: 📱 Configurar Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 📦 Instalar Plataformas Android SDK
-        run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
       - name: 🟩 Configurar Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: 📦 Instalar Dependências do Projeto
         run: npm install
@@ -51,8 +42,13 @@ jobs:
       - name: ⚡ Compilar Aplicação Web (Vite Build)
         run: npm run build
 
-      - name: 🔄 Sincronizar com Capacitor Android
-        run: npx cap sync android
+      - name: 📱 Verificar e Sincronizar Projeto Android (Capacitor)
+        run: |
+          if [ ! -d "android" ]; then
+            echo "Pasta android não encontrada. Inicializando plataforma Android nativa..."
+            npx cap add android
+          fi
+          npx cap sync android
 
       - name: 🔑 Permissão de Execução para Gradle Wrapper
         run: chmod +x android/gradlew
@@ -62,26 +58,27 @@ jobs:
           cd android
           if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
             echo "Compilando APK em modo RELEASE..."
-            ./gradlew assembleRelease --stacktrace
+            ./gradlew assembleRelease --no-daemon --stacktrace
           else
             echo "Compilando APK em modo DEBUG..."
-            ./gradlew assembleDebug --stacktrace
+            ./gradlew assembleDebug --no-daemon --stacktrace
           fi
           cd ..
 
-      - name: 📂 Preparar Arquivos APK para Download
+      - name: 📂 Localizar e Organizar APK Gerado
         run: |
           mkdir -p build-artifacts
           find android/app/build/outputs/apk/ -type f -name "*.apk" -exec cp {} build-artifacts/ \;
           cd build-artifacts
           for f in *.apk; do
             if [ -f "$f" ]; then
-              mv "$f" "GSI_PRO_${f}"
+              cp "$f" "GSI_PRO_${f}"
             fi
           done
-          ls -la
+          echo "=== Arquivos APK gerados ==="
+          ls -lh
 
-      - name: 🚀 Publicar APK nos Artefatos do GitHub Actions
+      - name: 🚀 Disponibilizar APK para Download
         uses: actions/upload-artifact@v4
         with:
           name: GSI-PRO-Android-APK
@@ -92,14 +89,12 @@ jobs:
         run: |
           echo "### 🎉 APK Compilado com Sucesso!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "O aplicativo nativo **GSI PRO** para Android foi gerado com sucesso pelo GitHub Actions." >> $GITHUB_STEP_SUMMARY
+          echo "O APK do **GSI PRO** foi gerado com sucesso pelo GitHub Actions." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Nome do Pacote**: \`com.gsipro.app\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **SDK Alvo**: Android 15 (API 35)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tipo**: ${{ github.event.inputs.build_type || 'debug' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **App ID**: \`com.gsipro.app\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Modo**: ${{ github.event.inputs.build_type || 'debug' }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "⬇️ **Como Baixar o APK:**" >> $GITHUB_STEP_SUMMARY
-          echo "1. Vá até a aba **Actions** no topo do seu repositório no GitHub." >> $GITHUB_STEP_SUMMARY
-          echo "2. Clique nesta execução da workflow." >> $GITHUB_STEP_SUMMARY
-          echo "3. Role até o final da página na seção **Artifacts** (Artefatos)." >> $GITHUB_STEP_SUMMARY
-          echo "4. Baixe o arquivo **GSI-PRO-Android-APK.zip**, extraia e instale no seu celular Android." >> $GITHUB_STEP_SUMMARY
+          echo "### ⬇️ Como Baixar o APK:" >> $GITHUB_STEP_SUMMARY
+          echo "1. No topo desta página, role até a seção **Artifacts**." >> $GITHUB_STEP_SUMMARY
+          echo "2. Clique em **GSI-PRO-Android-APK** para baixar o arquivo zip com o APK." >> $GITHUB_STEP_SUMMARY
+          echo "3. Transfira para o seu celular Android e instale normalmente." >> $GITHUB_STEP_SUMMARY
