@@ -2331,7 +2331,12 @@ export default function Messenger({
       className="fixed inset-0 z-[100] bg-[#0a0e17] flex flex-col md:inset-auto md:right-6 md:bottom-20 md:w-[440px] md:h-[660px] md:rounded-[2.5rem] md:border md:border-white/10 md:shadow-2xl overflow-hidden"
     >
       {/* Top Header of Messenger */}
-      <div className="bg-[#1c2431] px-5 py-4 flex items-center justify-between border-b border-white/5 relative z-20">
+      <div 
+        className="bg-[#1c2431] px-5 pb-4 flex items-center justify-between border-b border-white/5 relative z-20"
+        style={{
+          paddingTop: 'calc(env(safe-area-inset-top, 0px) + 0.85rem)'
+        }}
+      >
         <div className="flex items-center gap-3 min-w-0">
           {selectedGroup ? (
             <button 
@@ -3127,7 +3132,10 @@ export default function Messenger({
 
             {/* Input Bar or Active Recording Toolbar */}
             {isRecording ? (
-              <div className="p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-3 relative z-20 animate-fadeIn">
+              <div 
+                className="p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-3 relative z-20 animate-fadeIn"
+                style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
+              >
                 <div className="flex items-center gap-2.5 text-red-600 font-bold text-xs">
                   <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping inline-block" />
                   <span className="tracking-wide">Gravando: {formatRecordingTime(recordingTime)}</span>
@@ -3152,7 +3160,10 @@ export default function Messenger({
                 </div>
               </div>
             ) : (
-              <div className="p-3 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-2 relative z-20">
+              <div 
+                className="p-3 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-2 relative z-20"
+                style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
+              >
                 <button 
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isUploading}
@@ -3683,7 +3694,10 @@ export default function Messenger({
 
                 {/* Input Bar or Active Recording Toolbar in Direct Chat */}
                 {isRecording ? (
-                  <div className="p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-3 relative z-20 animate-fadeIn">
+                  <div 
+                    className="p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-3 relative z-20 animate-fadeIn"
+                    style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
+                  >
                     <div className="flex items-center gap-2.5 text-red-600 font-bold text-xs">
                       <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping inline-block" />
                       <span className="tracking-wide">Gravando: {formatRecordingTime(recordingTime)}</span>
@@ -3708,7 +3722,10 @@ export default function Messenger({
                     </div>
                   </div>
                 ) : (
-                  <div className="p-3 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-2 relative z-20">
+                  <div 
+                    className="p-3 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-2 relative z-20"
+                    style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
+                  >
                     <button 
                       onClick={() => privateFileInputRef.current?.click()}
                       disabled={isUploading}

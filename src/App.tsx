@@ -94,7 +94,8 @@ export default function App() {
   // Native Android Capacitor Lifecycle (Back button & Status Bar)
   useEffect(() => {
     if (Capacitor.isNativePlatform()) {
-      StatusBar.setBackgroundColor({ color: '#0a0e17' }).catch(() => {});
+      StatusBar.setOverlaysWebView({ overlay: true }).catch(() => {});
+      StatusBar.setBackgroundColor({ color: '#00000000' }).catch(() => {});
       StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
 
       let removeListener: (() => void) | undefined;
@@ -694,7 +695,12 @@ export default function App() {
   if (!session) return <Auth />;
 
   return (
-    <div className="min-h-screen bg-[#0a0e17] text-white font-sans selection:bg-[#d4af37]/30 pb-24 transition-all duration-500 overflow-x-hidden">
+    <div 
+      className="min-h-screen bg-[#0a0e17] text-white font-sans selection:bg-[#d4af37]/30 transition-all duration-500 overflow-x-hidden"
+      style={{
+        paddingBottom: 'calc(5.75rem + env(safe-area-inset-bottom, 0px))'
+      }}
+    >
       {/* Background radial glow */}
       <div className="fixed inset-0 pointer-events-none">
         <div className="absolute top-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-900/20 blur-[120px] rounded-full" />
@@ -703,7 +709,12 @@ export default function App() {
 
       {/* Header */}
       {!isImmersive && (
-        <header className="flex justify-between items-start px-6 pt-8 pb-4 sticky top-0 z-[60] bg-[#0a0e17]/80 backdrop-blur-md">
+        <header 
+          className="flex justify-between items-start px-6 pb-4 sticky top-0 z-[60] bg-[#0a0e17]/90 backdrop-blur-md transition-all"
+          style={{
+            paddingTop: 'calc(env(safe-area-inset-top, 0px) + 0.85rem)'
+          }}
+        >
           <div className="space-y-0.5">
             <h1 className="text-2xl font-black tracking-tighter text-white">
               {activeTab === 'ponto' ? 'Marcar Ponto' : 'Ponto Social'}
@@ -908,7 +919,13 @@ export default function App() {
 
       {/* Mobile Navigation */}
       {!isImmersive && (
-        <nav className="fixed bottom-0 left-0 right-0 h-20 border-t border-white/5 flex items-center justify-around px-4 z-[60] bg-[#0a0e17]/95 backdrop-blur-xl">
+        <nav 
+          className="fixed bottom-0 left-0 right-0 border-t border-white/5 flex items-center justify-around px-4 z-[60] bg-[#0a0e17]/95 backdrop-blur-xl transition-all"
+          style={{
+            paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+            height: 'calc(4.75rem + env(safe-area-inset-bottom, 0px))'
+          }}
+        >
           <button 
             onClick={() => setActiveTab('home')}
             className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'home' ? 'text-[#d4af37] scale-110' : 'text-white/30'}`}
@@ -1070,7 +1087,10 @@ export default function App() {
               setIncomingMessageToast(null);
               setUnreadMsgCount(0);
             }}
-            className="fixed top-5 left-1/2 -translate-x-1/2 z-[150] w-[92%] max-w-md bg-[#1c2431]/95 border border-[#d4af37]/40 shadow-2xl shadow-black/80 rounded-2xl p-3.5 flex items-center gap-3 backdrop-blur-xl cursor-pointer hover:border-[#d4af37] transition-all"
+            className="fixed left-1/2 -translate-x-1/2 z-[150] w-[92%] max-w-md bg-[#1c2431]/95 border border-[#d4af37]/40 shadow-2xl shadow-black/80 rounded-2xl p-3.5 flex items-center gap-3 backdrop-blur-xl cursor-pointer hover:border-[#d4af37] transition-all"
+            style={{
+              top: 'calc(env(safe-area-inset-top, 0px) + 0.85rem)'
+            }}
           >
             <div className="w-10 h-10 rounded-full overflow-hidden border border-[#d4af37] bg-black/50 flex items-center justify-center flex-shrink-0">
               {incomingMessageToast.senderAvatar ? (
