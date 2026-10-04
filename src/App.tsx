@@ -13,7 +13,6 @@ import AnnouncementBoard from './components/AnnouncementBoard';
 import SocialFeed from './components/SocialFeed';
 import ReelsView from './components/ReelsView';
 import Messenger from './components/Messenger';
-import { PWAInstallButton } from './components/PWAInstallButton';
 import FCMPushModal from './components/FCMPushModal';
 import { registerFCMServiceWorker, setupForegroundMessageListener, requestFCMToken } from './services/firebaseMessaging';
 import { playNotificationSound, startIncomingCallRingtone, stopIncomingCallRingtone } from './lib/sounds';
@@ -725,7 +724,6 @@ export default function App() {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            <PWAInstallButton />
             <button 
               onClick={() => setIsFCMModalOpen(true)}
               className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center bg-white/5 hover:bg-[#d4af37]/15 transition-all relative group"

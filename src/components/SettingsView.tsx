@@ -302,6 +302,38 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
           </button>
         </div>
 
+        {/* Permissões do Sistema */}
+        <div className="bg-[#1c2431]/60 border border-white/5 rounded-3xl p-6 space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-[#d4af37]/10 rounded-xl text-[#d4af37]"><ShieldCheck size={20} /></div>
+            <div>
+              <h3 className="text-xs font-black uppercase tracking-widest text-white">Permissões de Sistema</h3>
+              <p className="text-[10px] text-white/40 font-medium">Câmera, Microfone e Localização GPS</p>
+            </div>
+          </div>
+          
+          <p className="text-xs text-white/60 leading-relaxed">
+            O Android solicita permissões automaticamente na primeira vez que envia fotos ou áudios. Toque abaixo para pré-autorizar o hardware:
+          </p>
+
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+                stream.getTracks().forEach(t => t.stop());
+                alert('✅ Permissões de Câmera e Microfone concedidas com sucesso!');
+              } catch (e) {
+                alert('ℹ️ Se não abriu o diálogo, verifique se a Câmera e Microfone estão autorizados em Configurações > Aplicativos > GSI PRO.');
+              }
+            }}
+            className="w-full py-3.5 bg-white/5 hover:bg-[#d4af37]/15 border border-[#d4af37]/30 hover:border-[#d4af37] text-[#d4af37] font-black uppercase text-[11px] tracking-wider rounded-2xl transition-all flex items-center justify-center gap-2 active:scale-98"
+          >
+            <Camera size={15} />
+            Pré-Autorizar Câmera e Microfone
+          </button>
+        </div>
+
         <div className="space-y-6">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-[#d4af37]/10 rounded-lg text-[#d4af37]"><Clock size={20} /></div>

@@ -273,26 +273,43 @@ export default function ProfileView({
 
             {/* Work Timeline / Calendar View */}
             <div className="space-y-6">
-              <div className="flex items-center justify-between px-2">
-                <h4 className="text-xs font-black uppercase tracking-[0.3em] text-white/40 flex items-center gap-2">
-                  <CalendarIcon size={14} className="text-[#d4af37]" /> Histórico Mensal
-                </h4>
-                
-                <div className="flex items-center gap-4">
-                  <div className="flex items-center bg-[#1c2431] rounded-xl border border-white/5 p-1">
-                    <button onClick={() => setViewDate(subMonths(viewDate, 1))} className="p-2 hover:text-[#d4af37] transition-colors text-white/40"><ChevronLeft size={16} /></button>
-                    <span className="text-[10px] font-black text-white uppercase px-4 min-w-[120px] text-center">
-                      {format(viewDate, 'MMMM yyyy', { locale: ptBR })}
-                    </span>
-                    <button onClick={() => setViewDate(addMonths(viewDate, 1))} className="p-2 hover:text-[#d4af37] transition-colors text-white/40"><ChevronRight size={16} /></button>
-                  </div>
+              {/* Header do Histórico Mensal e Ação de Exportação JPG */}
+              <div className="space-y-3 px-1">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="text-xs font-black uppercase tracking-[0.25em] text-white/50 flex items-center gap-2">
+                    <CalendarIcon size={14} className="text-[#d4af37]" /> Histórico Mensal
+                  </h4>
                   
+                  {/* Botão de Ação JPG Superior */}
                   <button 
                     onClick={generateJPG}
                     disabled={exporting}
-                    className="flex items-center gap-2 px-4 py-3 bg-[#d4af37] text-black rounded-xl text-[10px] font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all shadow-lg shadow-[#d4af37]/20 disabled:opacity-50"
+                    className="flex items-center gap-2 px-3.5 py-2 bg-[#d4af37] hover:bg-[#e5c04b] text-black rounded-xl text-[10px] font-black uppercase tracking-wider hover:scale-105 active:scale-95 transition-all shadow-lg shadow-[#d4af37]/25 disabled:opacity-50 flex-shrink-0"
+                    title="Baixar folha de ponto do mês em formato JPG"
                   >
-                    <Download size={14} /> {exporting ? 'Gerando...' : 'JPG'}
+                    <Download size={14} className="stroke-[2.5]" />
+                    <span>{exporting ? 'Gerando...' : 'Folha JPG'}</span>
+                  </button>
+                </div>
+                
+                {/* Navegador de Mês */}
+                <div className="flex items-center justify-between bg-[#1c2431] rounded-2xl border border-white/5 p-1.5 shadow-inner">
+                  <button 
+                    onClick={() => setViewDate(subMonths(viewDate, 1))} 
+                    className="p-2.5 hover:text-[#d4af37] hover:bg-white/5 rounded-xl transition-all text-white/50"
+                    title="Mês anterior"
+                  >
+                    <ChevronLeft size={18} />
+                  </button>
+                  <span className="text-xs font-black text-white uppercase tracking-wider text-center">
+                    {format(viewDate, 'MMMM yyyy', { locale: ptBR })}
+                  </span>
+                  <button 
+                    onClick={() => setViewDate(addMonths(viewDate, 1))} 
+                    className="p-2.5 hover:text-[#d4af37] hover:bg-white/5 rounded-xl transition-all text-white/50"
+                    title="Próximo mês"
+                  >
+                    <ChevronRight size={18} />
                   </button>
                 </div>
               </div>
@@ -330,6 +347,16 @@ export default function ProfileView({
                     );
                   })}
                 </div>
+
+                {/* Botão em destaque para gerar Folha de Ponto JPG */}
+                <button 
+                  onClick={generateJPG}
+                  disabled={exporting}
+                  className="w-full mt-6 py-3 px-4 bg-gradient-to-r from-[#d4af37] to-[#f3cf65] hover:from-[#e5c04b] hover:to-[#ffd700] text-black font-black rounded-2xl text-xs uppercase tracking-widest flex items-center justify-center gap-2.5 transition-all shadow-xl shadow-[#d4af37]/20 active:scale-98 disabled:opacity-50"
+                >
+                  <Download size={16} className="stroke-[2.5]" />
+                  <span>{exporting ? 'A Gerar Folha...' : 'Baixar Folha de Ponto Mensal (JPG)'}</span>
+                </button>
               </div>
 
               {/* Edit Day Modal */}

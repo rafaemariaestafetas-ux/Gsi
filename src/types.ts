@@ -16,10 +16,35 @@ export interface Profile {
 
 export interface Announcement {
   id?: string;
+  title?: string;
+  subtitle?: string;
   content: string;
+  media_url?: string;
+  media_type?: 'image' | 'video' | 'none';
+  badge?: string;
   created_at: string;
   user_id: string;
   author_name: string;
+}
+
+export interface PollOption {
+  id: string;
+  text: string;
+  image_url?: string;
+  votes: string[]; // user_ids who voted for this option
+}
+
+export interface PollData {
+  question: string;
+  options: PollOption[];
+  multiple_answers?: boolean;
+}
+
+export interface LocationData {
+  latitude: number;
+  longitude: number;
+  address?: string;
+  name?: string;
 }
 
 export interface ReplyInfo {
@@ -27,7 +52,7 @@ export interface ReplyInfo {
   content: string;
   sender_name?: string;
   sender_id?: string;
-  type?: 'text' | 'image' | 'audio' | 'call_log';
+  type?: 'text' | 'image' | 'audio' | 'call_log' | 'location' | 'poll';
   media_url?: string;
 }
 
@@ -39,13 +64,15 @@ export interface Message {
   created_at: string;
   sender_name?: string;
   sender_avatar?: string;
-  type?: 'text' | 'image' | 'audio' | 'call_log';
+  type?: 'text' | 'image' | 'audio' | 'call_log' | 'location' | 'poll';
   media_url?: string;
   is_view_once?: boolean;
   view_once_opened?: boolean;
   opened_by?: string[];
   is_deleted?: boolean;
   deleted_for?: string[];
+  poll?: PollData;
+  location?: LocationData;
   call_info?: {
     type: 'video' | 'audio';
     status: 'missed' | 'declined' | 'completed' | 'cancelled';
@@ -87,13 +114,15 @@ export interface GroupMessage {
   group_id: string;
   sender_id: string;
   content: string;
-  type: 'text' | 'image' | 'audio';
+  type: 'text' | 'image' | 'audio' | 'location' | 'poll';
   media_url?: string;
   is_view_once?: boolean;
   view_once_opened?: boolean;
   opened_by?: string[];
   is_deleted?: boolean;
   deleted_for?: string[];
+  poll?: PollData;
+  location?: LocationData;
   created_at: string;
   sender_name?: string;
   sender_avatar?: string;
