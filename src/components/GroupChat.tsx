@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../services/supabaseClient';
-import { ChatGroup, GroupMessage, GroupMember, MessageReaction, Profile } from '../types';
+import { ChatGroup, GroupMessage, GroupMember, MessageReaction, Profile, PollOption, PollData, LocationData } from '../types';
 import { 
   Users, 
   MessageSquare, 
@@ -21,7 +21,11 @@ import {
   Play,
   Pause,
   LogOut,
-  Square
+  Square,
+  MapPin,
+  BarChart2,
+  ExternalLink,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
@@ -62,6 +66,17 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
   const [isPrivate, setIsPrivate] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
 
+  // Attachment Menu & Poll States
+  const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
+  const [showPollModal, setShowPollModal] = useState(false);
+  const [pollQuestion, setPollQuestion] = useState('');
+  const [pollOptions, setPollOptions] = useState<Array<{ id: string; text: string; image_url?: string; file?: File; preview?: string }>>([
+    { id: '1', text: '', image_url: undefined },
+    { id: '2', text: '', image_url: undefined }
+  ]);
+  const [pollAllowMultiple, setPollAllowMultiple] = useState(false);
+  const [isCreatingPoll, setIsCreatingPoll] = useState(false);
+
   // Chat form
   const [newMessage, setNewMessage] = useState('');
   const [isRecording, setIsRecording] = useState(false);
@@ -74,6 +89,7 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
   const timerRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const groupCoverInputRef = useRef<HTMLInputElement>(null);
 
   const cleanupActiveStream = useCallback(() => {
@@ -174,6 +190,46 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
     }
   };
 
+  const parseGroupMessage = (msg: any): GroupMessage => {
+    if (!msg) return msg;
+    let content = msg.content || '';
+    let poll: PollData | undefined = msg.poll;
+    let location: LocationData | undefined = msg.location;
+
+    if (typeof content === 'string' && content.includes('\n__GSI_META__')) {
+      const parts = content.split('\n__GSI_META__');
+      content = parts[0];
+      try {
+        const parsed = JSON.parse(parts[1]);
+        if (parsed.poll) poll = parsed.poll;
+        if (parsed.location) location = parsed.location;
+        if (parsed.type) msg.type = parsed.type;
+      } catch {}
+    }
+
+    return {
+      ...msg,
+      content,
+      poll,
+      location,
+      type: poll ? 'poll' : location ? 'location' : (msg.type || 'text')
+    };
+  };
+
+  const encodeGroupMessageContent = (
+    rawContent: string,
+    meta?: { poll?: PollData; location?: LocationData; type?: string }
+  ) => {
+    let text = rawContent || '';
+    if (text.includes('\n__GSI_META__')) {
+      text = text.split('\n__GSI_META__')[0];
+    }
+    if (meta && Object.keys(meta).length > 0) {
+      text += `\n__GSI_META__${JSON.stringify(meta)}`;
+    }
+    return text;
+  };
+
   const fetchMessages = async () => {
     if (!selectedGroup) return;
     try {
@@ -186,7 +242,7 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
       if (error) throw error;
       
       if (data) {
-        setMessages(data);
+        setMessages(data.map(parseGroupMessage));
         fetchReactions();
       }
     } catch (err) {
@@ -334,28 +390,36 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
     }
   };
 
-  const handleSendMessage = async (type: 'text' | 'image' | 'audio' = 'text', mediaUrl?: string) => {
+  const handleSendMessage = async (
+    type: 'text' | 'image' | 'audio' | 'location' | 'poll' = 'text', 
+    mediaUrl?: string,
+    customCaption?: string,
+    metaOptions?: { poll?: PollData; location?: LocationData; type?: string }
+  ) => {
     if (!selectedGroup) return;
     if (type === 'text' && !newMessage.trim()) return;
 
     try {
+      const rawText = type === 'text' ? newMessage : (customCaption || '');
+      const dbContent = encodeGroupMessageContent(rawText, metaOptions);
+
       const messageData = {
         group_id: selectedGroup.id,
         sender_id: currentUserId,
-        content: type === 'text' ? newMessage : '',
-        type,
+        content: dbContent,
+        type: metaOptions?.type || type,
         media_url: mediaUrl,
         sender_name: userName
       };
 
-      const contentPreview = type === 'text' ? newMessage : (type === 'audio' ? '🎵 Mensagem de áudio' : '📷 Imagem');
+      const contentPreview = type === 'text' ? newMessage : (type === 'audio' ? '🎵 Mensagem de áudio' : type === 'location' ? '📍 Localização Partilhada' : type === 'poll' ? '📊 Enquete de Votação' : '📷 Imagem');
 
-      const { error } = await supabase.from('group_messages').insert([messageData]);
+      let { error } = await supabase.from('group_messages').insert([messageData]);
       
       if (error) {
-        console.error('Error sending message:', error);
-        alert('Erro ao enviar mensagem: ' + error.message);
-        return;
+        // Fallback for strict enum constraint
+        const fallback = { ...messageData, type: 'text' };
+        await supabase.from('group_messages').insert([fallback]);
       }
 
       triggerBackgroundNotification({
@@ -374,6 +438,139 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
     } catch (err: any) {
       console.error('Send error:', err);
       alert('Erro inesperado ao enviar.');
+    }
+  };
+
+  // Send GPS Location
+  const sendLocationMessage = async () => {
+    setShowAttachmentMenu(false);
+    if (!navigator.geolocation) {
+      alert('Geolocalização não é suportada pelo seu dispositivo.');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        const locData: LocationData = {
+          latitude: lat,
+          longitude: lng,
+          address: `GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}`
+        };
+
+        const displayContent = `📍 Localização Partilhada: https://maps.google.com/?q=${lat},${lng}`;
+        await handleSendMessage('location', undefined, displayContent, {
+          location: locData,
+          type: 'location'
+        });
+      },
+      (err) => {
+        console.warn('Erro ao obter localização:', err);
+        alert('Não foi possível obter o GPS. Certifique-se de que a localização está ativada no celular.');
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
+
+  // Vote on a Poll Option
+  const handleVotePoll = async (msg: GroupMessage, optionId: string) => {
+    const currentPoll = msg.poll;
+    if (!currentPoll) return;
+
+    const newOptions = currentPoll.options.map(opt => {
+      const currentVotes = opt.votes || [];
+      const userHasVoted = currentVotes.includes(currentUserId);
+
+      if (opt.id === optionId) {
+        if (userHasVoted) {
+          return { ...opt, votes: currentVotes.filter(uid => uid !== currentUserId) };
+        } else {
+          return { ...opt, votes: [...currentVotes, currentUserId] };
+        }
+      } else {
+        if (!currentPoll.multiple_answers) {
+          return { ...opt, votes: currentVotes.filter(uid => uid !== currentUserId) };
+        }
+        return opt;
+      }
+    });
+
+    const updatedPoll: PollData = {
+      ...currentPoll,
+      options: newOptions
+    };
+
+    const newEncoded = encodeGroupMessageContent(msg.content, {
+      poll: updatedPoll,
+      type: 'poll'
+    });
+
+    setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, poll: updatedPoll, content: newEncoded } : m));
+    await supabase.from('group_messages').update({ content: newEncoded }).eq('id', msg.id);
+  };
+
+  // Submit and Publish a Poll
+  const handleCreatePollSubmit = async () => {
+    const validOptions = pollOptions.filter(o => o.text.trim().length > 0);
+    if (!pollQuestion.trim() || validOptions.length < 2) {
+      alert('Informe a pergunta e pelo menos 2 opções.');
+      return;
+    }
+
+    setIsCreatingPoll(true);
+    try {
+      const uploadedOptions: PollOption[] = [];
+      for (const opt of validOptions) {
+        let finalImg = opt.image_url;
+        if (opt.file) {
+          const fileExt = opt.file.name.split('.').pop() || 'jpg';
+          const fileName = `poll_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${fileExt}`;
+          const filePath = `polls/${fileName}`;
+
+          const { error: uploadErr } = await supabase.storage
+            .from('avatars')
+            .upload(filePath, opt.file, { cacheControl: '3600', upsert: true });
+
+          if (!uploadErr) {
+            const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(filePath);
+            finalImg = publicUrl;
+          } else if (opt.preview) {
+            finalImg = opt.preview;
+          }
+        }
+        uploadedOptions.push({
+          id: opt.id,
+          text: opt.text.trim(),
+          image_url: finalImg,
+          votes: []
+        });
+      }
+
+      const pollData: PollData = {
+        question: pollQuestion.trim(),
+        options: uploadedOptions,
+        multiple_answers: pollAllowMultiple
+      };
+
+      const pollText = `📊 Enquete: ${pollData.question}`;
+      await handleSendMessage('poll', undefined, pollText, {
+        poll: pollData,
+        type: 'poll'
+      });
+
+      setShowPollModal(false);
+      setPollQuestion('');
+      setPollOptions([
+        { id: '1', text: '' },
+        { id: '2', text: '' }
+      ]);
+      setPollAllowMultiple(false);
+    } catch (err) {
+      console.error('Erro ao criar enquete:', err);
+      alert('Erro ao criar enquete.');
+    } finally {
+      setIsCreatingPoll(false);
     }
   };
 
@@ -916,9 +1113,119 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                                 }
                               `} />
 
-                              {msg.type === 'text' && (
+                              {(msg.type === 'poll' || msg.poll) ? (
+                                /* Enquete de Votação Interativa com Fotos */
+                                <div className="space-y-3 p-1 min-w-[260px] max-w-[320px]">
+                                  <div className="flex items-center justify-between border-b border-black/10 pb-2">
+                                    <div className="flex items-center gap-1.5 text-[#075e54] font-black text-[10px] uppercase tracking-wider">
+                                      <BarChart2 size={14} />
+                                      <span>Enquete de Votação</span>
+                                    </div>
+                                    <span className="text-[9px] text-slate-500 font-semibold">
+                                      {msg.poll?.multiple_answers ? 'Múltipla escolha' : 'Escolha única'}
+                                    </span>
+                                  </div>
+
+                                  <h4 className="text-xs font-black text-slate-900 leading-snug">
+                                    {msg.poll?.question}
+                                  </h4>
+
+                                  {/* Opções de Voto com Barras Animadas */}
+                                  <div className="space-y-2">
+                                    {msg.poll?.options.map((opt) => {
+                                      const totalVotes = msg.poll!.options.reduce((sum, o) => sum + (o.votes?.length || 0), 0);
+                                      const optVotes = opt.votes?.length || 0;
+                                      const percentage = totalVotes > 0 ? Math.round((optVotes / totalVotes) * 100) : 0;
+                                      const hasVoted = opt.votes?.includes(currentUserId);
+
+                                      return (
+                                        <button
+                                          key={opt.id}
+                                          type="button"
+                                          onClick={() => handleVotePoll(msg, opt.id)}
+                                          className={`w-full text-left p-2.5 rounded-2xl border transition-all relative overflow-hidden group active:scale-98 ${
+                                            hasVoted 
+                                              ? 'border-[#00a884] bg-[#00a884]/10 shadow-sm' 
+                                              : 'border-slate-200 bg-white/70 hover:border-slate-300'
+                                          }`}
+                                        >
+                                          {/* Barra animada de progresso */}
+                                          <motion.div
+                                            initial={false}
+                                            animate={{ width: `${percentage}%` }}
+                                            transition={{ duration: 0.5, ease: 'easeOut' }}
+                                            className={`absolute top-0 bottom-0 left-0 ${hasVoted ? 'bg-[#00a884]/20' : 'bg-slate-200/60'} pointer-events-none rounded-2xl`}
+                                          />
+
+                                          <div className="relative z-10 flex items-center justify-between gap-2.5">
+                                            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                              {/* Checkbox circular */}
+                                              <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
+                                                hasVoted ? 'border-[#00a884] bg-[#00a884] text-white' : 'border-slate-300 bg-white'
+                                              }`}>
+                                                {hasVoted && <Check size={10} className="stroke-[3]" />}
+                                              </div>
+
+                                              {/* Foto da Opção se houver */}
+                                              {opt.image_url && (
+                                                <div className="w-11 h-11 rounded-xl overflow-hidden border border-black/10 flex-shrink-0 shadow-sm bg-slate-100">
+                                                  <img src={opt.image_url} alt="" className="w-full h-full object-cover" />
+                                                </div>
+                                              )}
+
+                                              {/* Texto da Opção */}
+                                              <span className={`text-xs font-bold truncate ${hasVoted ? 'text-[#075e54]' : 'text-slate-800'}`}>
+                                                {opt.text}
+                                              </span>
+                                            </div>
+
+                                            {/* Contagem e % */}
+                                            <div className="text-right flex-shrink-0">
+                                              <span className="text-xs font-black text-slate-800">{percentage}%</span>
+                                              <span className="block text-[8.5px] text-slate-500 font-semibold">{optVotes} {optVotes === 1 ? 'voto' : 'votos'}</span>
+                                            </div>
+                                          </div>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+
+                                  <div className="pt-1 text-[9px] text-slate-500 flex items-center justify-between border-t border-black/5">
+                                    <span>
+                                      Total: {msg.poll?.options.reduce((sum, o) => sum + (o.votes?.length || 0), 0) || 0} votos
+                                    </span>
+                                    <span className="font-semibold text-[#00a884]">Toque para votar</span>
+                                  </div>
+                                </div>
+                              ) : (msg.type === 'location' || msg.location) ? (
+                                /* Localização Partilhada Card */
+                                <div className="space-y-2.5 p-1 min-w-[240px] max-w-[280px]">
+                                  <div 
+                                    className="relative rounded-2xl overflow-hidden border border-white/10 bg-[#0a0e17] aspect-[16/9] flex flex-col items-center justify-center p-3 text-center group cursor-pointer"
+                                    onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=${msg.location?.latitude},${msg.location?.longitude}`)}
+                                  >
+                                    <div className="absolute inset-0 opacity-25 bg-[radial-gradient(#00a884_1px,transparent_1px)] [background-size:14px_14px]" />
+                                    <div className="w-10 h-10 rounded-full bg-red-500/20 border-2 border-red-500 flex items-center justify-center text-red-500 shadow-lg mb-1 animate-bounce">
+                                      <MapPin size={20} />
+                                    </div>
+                                    <p className="text-xs font-black text-white relative z-10">Localização em Tempo Real</p>
+                                    <p className="text-[9px] text-white/60 relative z-10 font-mono mt-0.5">
+                                      {msg.location ? `${msg.location.latitude.toFixed(4)}, ${msg.location.longitude.toFixed(4)}` : 'Ver no mapa'}
+                                    </p>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => window.open(`https://www.google.com/maps/search/?api=1&query=${msg.location?.latitude},${msg.location?.longitude}`)}
+                                    className="w-full py-2.5 px-3 bg-[#00a884] hover:bg-[#008f6f] text-white font-black text-[10px] uppercase tracking-wider rounded-xl shadow-md flex items-center justify-center gap-1.5 transition-all active:scale-98"
+                                  >
+                                    <ExternalLink size={13} />
+                                    <span>Abrir no Google Maps (Navegar)</span>
+                                  </button>
+                                </div>
+                              ) : msg.type === 'text' ? (
                                 <p className="text-[13px] font-normal leading-relaxed break-words text-[#111b21]">{msg.content}</p>
-                              )}
+                              ) : null}
                               
                               {msg.type === 'image' && (
                                 <div className="space-y-2">
@@ -1041,15 +1348,101 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-1">
+                  {/* Botão de Anexos Discreto WhatsApp (+) */}
+                  <div className="relative flex-shrink-0">
                     <button 
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-10 h-10 flex items-center justify-center text-slate-500 hover:text-[#075e54] transition-all bg-white rounded-full shadow-sm border border-slate-200"
+                      type="button"
+                      onClick={() => setShowAttachmentMenu(prev => !prev)}
+                      className="w-10 h-10 flex items-center justify-center text-slate-500 hover:text-[#00a884] transition-all bg-white rounded-full shadow-sm border border-slate-200 active:scale-95"
+                      title="Anexar (Localização, Enquete, Câmera, Galeria)"
                     >
-                      <Plus size={20} />
+                      <Plus size={20} className={`transition-transform duration-200 ${showAttachmentMenu ? 'rotate-45 text-[#00a884]' : ''}`} />
                     </button>
-                    <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleImageUpload} />
+
+                    {/* WhatsApp-Style Popup Menu */}
+                    <AnimatePresence>
+                      {showAttachmentMenu && (
+                        <motion.div 
+                          initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                          animate={{ opacity: 1, scale: 1, y: 0 }}
+                          exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                          className="absolute bottom-full mb-3 left-0 bg-[#233138] border border-white/10 rounded-3xl p-3 shadow-2xl flex flex-col gap-2 z-50 min-w-[220px]"
+                        >
+                          {/* 1. Localização */}
+                          <button
+                            type="button"
+                            onClick={sendLocationMessage}
+                            className="flex items-center gap-3 p-2.5 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                          >
+                            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+                              <MapPin size={18} />
+                            </div>
+                            <div>
+                              <p className="text-xs font-black text-white leading-tight">Localização</p>
+                              <p className="text-[9px] text-white/40">Onde estou agora (GPS)</p>
+                            </div>
+                          </button>
+
+                          {/* 2. Enquete */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowAttachmentMenu(false);
+                              setShowPollModal(true);
+                            }}
+                            className="flex items-center gap-3 p-2.5 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                          >
+                            <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+                              <BarChart2 size={18} />
+                            </div>
+                            <div>
+                              <p className="text-xs font-black text-white leading-tight">Enquete de Votação</p>
+                              <p className="text-[9px] text-white/40">Votação com opções e fotos</p>
+                            </div>
+                          </button>
+
+                          {/* 3. Câmera */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowAttachmentMenu(false);
+                              cameraInputRef.current?.click();
+                            }}
+                            className="flex items-center gap-3 p-2.5 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                          >
+                            <div className="w-9 h-9 rounded-xl bg-pink-500/20 text-pink-400 border border-pink-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+                              <Camera size={18} />
+                            </div>
+                            <div>
+                              <p className="text-xs font-black text-white leading-tight">Câmera</p>
+                              <p className="text-[9px] text-white/40">Tirar foto instantânea</p>
+                            </div>
+                          </button>
+
+                          {/* 4. Galeria */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowAttachmentMenu(false);
+                              fileInputRef.current?.click();
+                            }}
+                            className="flex items-center gap-3 p-2.5 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                          >
+                            <div className="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+                              <ImageIcon size={18} />
+                            </div>
+                            <div>
+                              <p className="text-xs font-black text-white leading-tight">Galeria</p>
+                              <p className="text-[9px] text-white/40">Fotos do dispositivo</p>
+                            </div>
+                          </button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
+                  
+                  <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleImageUpload} />
+                  <input type="file" ref={cameraInputRef} className="hidden" accept="image/*" capture="environment" onChange={handleImageUpload} />
                   
                   <div className="flex-1 relative">
                     <input 
@@ -1438,6 +1831,177 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                     Entendi
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Poll Creation Modal in GroupChat */}
+      <AnimatePresence>
+        {showPollModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[140] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
+            onClick={() => setShowPollModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md bg-[#1c2431] border border-white/10 rounded-3xl p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar text-white"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-white/10 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
+                    <BarChart2 size={16} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-white uppercase tracking-wider">
+                      Criar Enquete de Votação
+                    </h3>
+                    <p className="text-[10px] text-white/50">
+                      Votação com opções, fotos e contagem de votos
+                    </p>
+                  </div>
+                </div>
+                <button onClick={() => setShowPollModal(false)} className="p-1.5 text-white/40 hover:text-white rounded-lg">
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Pergunta */}
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-[#d4af37] block mb-1">
+                  Pergunta da Enquete *
+                </label>
+                <input
+                  type="text"
+                  value={pollQuestion}
+                  onChange={(e) => setPollQuestion(e.target.value)}
+                  placeholder="Ex: Em quem você vota para a eleição?"
+                  className="w-full bg-[#0a0e17] border border-white/10 rounded-xl px-3.5 py-2.5 text-xs font-bold text-white outline-none focus:border-[#d4af37]"
+                />
+              </div>
+
+              {/* Opções com Fotos */}
+              <div className="space-y-2.5">
+                <label className="text-[10px] font-black uppercase tracking-widest text-white/50 block">
+                  Opções de Voto (com foto opcional)
+                </label>
+
+                {pollOptions.map((opt, idx) => (
+                  <div key={opt.id} className="flex items-center gap-2 bg-[#0a0e17] p-2 rounded-2xl border border-white/5">
+                    {/* Foto da Opção (Preview ou Upload) */}
+                    <div className="relative">
+                      {opt.preview ? (
+                        <div className="relative w-11 h-11 rounded-xl overflow-hidden border border-[#d4af37]/40 flex-shrink-0 group">
+                          <img src={opt.preview} alt="" className="w-full h-full object-cover" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPollOptions(prev => prev.map(o => o.id === opt.id ? { ...o, file: undefined, preview: undefined, image_url: undefined } : o));
+                            }}
+                            className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center text-red-400 transition-opacity"
+                            title="Remover foto"
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ) : (
+                        <label className="w-11 h-11 rounded-xl border border-dashed border-white/20 hover:border-[#d4af37] bg-white/5 flex flex-col items-center justify-center text-white/40 hover:text-[#d4af37] cursor-pointer flex-shrink-0 transition-colors" title="Adicionar foto da opção">
+                          <Camera size={14} />
+                          <span className="text-[7px] font-black mt-0.5 uppercase">Foto</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              const preview = URL.createObjectURL(file);
+                              setPollOptions(prev => prev.map(o => o.id === opt.id ? { ...o, file, preview } : o));
+                            }}
+                          />
+                        </label>
+                      )}
+                    </div>
+
+                    {/* Texto da Opção */}
+                    <input
+                      type="text"
+                      value={opt.text}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setPollOptions(prev => prev.map(o => o.id === opt.id ? { ...o, text: val } : o));
+                      }}
+                      placeholder={`Opção ${idx + 1} (Ex: ${idx === 0 ? 'Lula' : idx === 1 ? 'Bolsonaro' : 'Outro'})`}
+                      className="flex-1 bg-transparent border-none text-xs font-bold text-white outline-none px-2 placeholder:text-white/25"
+                    />
+
+                    {/* Botão de remover opção se houver mais de 2 */}
+                    {pollOptions.length > 2 && (
+                      <button
+                        type="button"
+                        onClick={() => setPollOptions(prev => prev.filter(o => o.id !== opt.id))}
+                        className="p-1.5 text-white/30 hover:text-red-400 transition-colors"
+                        title="Remover opção"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+
+                {pollOptions.length < 8 && (
+                  <button
+                    type="button"
+                    onClick={() => setPollOptions(prev => [...prev, { id: Date.now().toString(), text: '' }])}
+                    className="w-full py-2.5 bg-white/5 hover:bg-white/10 border border-dashed border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-wider text-[#d4af37] flex items-center justify-center gap-1.5 transition-all"
+                  >
+                    <Plus size={14} />
+                    Adicionar Outra Opção
+                  </button>
+                )}
+              </div>
+
+              {/* Opção de Múltipla Escolha */}
+              <div className="flex items-center justify-between p-3 rounded-2xl bg-[#0a0e17] border border-white/5">
+                <div>
+                  <p className="text-xs font-bold text-white">Permitir várias respostas</p>
+                  <p className="text-[9px] text-white/40">Votantes podem marcar mais de uma opção</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPollAllowMultiple(prev => !prev)}
+                  className={`w-11 h-6 rounded-full transition-colors relative p-0.5 ${pollAllowMultiple ? 'bg-[#00a884]' : 'bg-white/10'}`}
+                >
+                  <div className={`w-5 h-5 rounded-full bg-white transition-transform ${pollAllowMultiple ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
+              {/* Botões de Ação */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setShowPollModal(false)}
+                  className="px-4 py-2 text-xs font-black uppercase text-white/50 hover:text-white"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreatePollSubmit}
+                  disabled={isCreatingPoll || !pollQuestion.trim() || pollOptions.filter(o => o.text.trim()).length < 2}
+                  className="px-5 py-2.5 bg-gradient-to-r from-[#00a884] to-[#008f6f] text-white font-black uppercase text-xs tracking-wider rounded-xl shadow-lg flex items-center gap-2 disabled:opacity-40 hover:scale-105 active:scale-95 transition-all"
+                >
+                  {isCreatingPoll ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                  <span>Criar Enquete</span>
+                </button>
               </div>
             </motion.div>
           </motion.div>

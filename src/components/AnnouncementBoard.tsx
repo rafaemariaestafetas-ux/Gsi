@@ -638,11 +638,11 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.95, y: 20 }}
               onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-lg bg-[#1c2431] border border-[#d4af37]/30 rounded-3xl p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar"
+              className="w-full max-w-lg bg-[#1c2431] border border-[#d4af37]/30 rounded-3xl shadow-2xl max-h-[85vh] flex flex-col overflow-hidden text-white"
             >
-              {/* Modal Header */}
-              <div className="flex items-center justify-between border-b border-white/10 pb-3">
-                <div className="flex items-center gap-2">
+              {/* Modal Header (Fixed) */}
+              <div className="flex items-center justify-between border-b border-white/10 p-5 flex-shrink-0 bg-[#141b26]">
+                <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-xl bg-[#d4af37]/20 border border-[#d4af37]/40 flex items-center justify-center text-[#d4af37]">
                     <Sparkles size={16} />
                   </div>
@@ -663,138 +663,141 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
                 </button>
               </div>
 
-              {/* Category / Badge Selector */}
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-black uppercase tracking-widest text-[#d4af37]">
-                  Categoria / Selo
-                </label>
-                <div className="flex flex-wrap gap-1.5">
-                  {BADGE_PRESETS.map((b) => (
-                    <button
-                      key={b.label}
-                      type="button"
-                      onClick={() => setNewBadge(b.label)}
-                      className={`px-3 py-1 rounded-xl text-[10px] font-black border transition-all ${
-                        newBadge === b.label 
-                          ? `${b.color} scale-105 shadow-md` 
-                          : 'bg-[#0a0e17] border-white/5 text-white/40 hover:text-white'
-                      }`}
-                    >
-                      {b.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Título & Subtítulo */}
-              <div className="space-y-3">
-                <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-white/50 block mb-1">
-                    Título Principal *
+              {/* Modal Body (Scrollable with touch momentum) */}
+              <div className="flex-1 overflow-y-auto p-5 space-y-4 custom-scrollbar">
+                {/* Category / Badge Selector */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-[#d4af37]">
+                    Categoria / Selo
                   </label>
-                  <input
-                    type="text"
-                    value={newTitle}
-                    onChange={(e) => setNewTitle(e.target.value)}
-                    placeholder="Ex: Treinamento Obrigatório de Segurança e EPIs"
-                    className="w-full bg-[#0a0e17] border border-white/10 rounded-xl px-3.5 py-2.5 text-xs font-bold text-white outline-none focus:border-[#d4af37] transition-colors"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-white/50 block mb-1">
-                    Subtítulo (Opcional)
-                  </label>
-                  <input
-                    type="text"
-                    value={newSubtitle}
-                    onChange={(e) => setNewSubtitle(e.target.value)}
-                    placeholder="Ex: Todas as quintas-feiras no Canteiro Central"
-                    className="w-full bg-[#0a0e17] border border-white/10 rounded-xl px-3.5 py-2.5 text-xs text-white outline-none focus:border-[#d4af37] transition-colors"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-white/50 block mb-1">
-                    Conteúdo / Instruções *
-                  </label>
-                  <textarea
-                    value={newContent}
-                    onChange={(e) => setNewContent(e.target.value)}
-                    placeholder="Descreva as instruções detalhadas, regras, horários ou avisos gerais para todos os colaboradores..."
-                    rows={3}
-                    className="w-full bg-[#0a0e17] border border-white/10 rounded-xl p-3.5 text-xs text-white outline-none focus:border-[#d4af37] transition-colors resize-none"
-                  />
-                </div>
-              </div>
-
-              {/* Anexo de Mídia (Foto ou Vídeo) */}
-              <div className="space-y-2 pt-2 border-t border-white/5">
-                <label className="text-[10px] font-black uppercase tracking-widest text-[#d4af37] flex items-center justify-between">
-                  <span>Anexar Foto ou Vídeo</span>
-                  {mediaPreview && (
-                    <button 
-                      type="button" 
-                      onClick={removeSelectedFile}
-                      className="text-red-400 hover:underline text-[9px] lowercase font-normal"
-                    >
-                      remover mídia
-                    </button>
-                  )}
-                </label>
-
-                {/* Preview Box */}
-                {mediaPreview ? (
-                  <div className="relative aspect-video rounded-2xl overflow-hidden border border-[#d4af37]/40 bg-black">
-                    {newMediaType === 'video' ? (
-                      <video src={mediaPreview} controls className="w-full h-full object-cover" />
-                    ) : (
-                      <img src={mediaPreview} alt="Preview" className="w-full h-full object-cover" />
-                    )}
+                  <div className="flex flex-wrap gap-1.5">
+                    {BADGE_PRESETS.map((b) => (
+                      <button
+                        key={b.label}
+                        type="button"
+                        onClick={() => setNewBadge(b.label)}
+                        className={`px-3 py-1 rounded-xl text-[10px] font-black border transition-all ${
+                          newBadge === b.label 
+                            ? `${b.color} scale-105 shadow-md` 
+                            : 'bg-[#0a0e17] border-white/5 text-white/40 hover:text-white'
+                        }`}
+                      >
+                        {b.label}
+                      </button>
+                    ))}
                   </div>
-                ) : (
-                  <div className="grid grid-cols-2 gap-2">
-                    {/* Upload File Button */}
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="p-3.5 rounded-2xl border border-dashed border-white/15 hover:border-[#d4af37] bg-[#0a0e17] flex flex-col items-center justify-center gap-1.5 text-white/60 hover:text-white transition-all text-center"
-                    >
-                      <Upload size={18} className="text-[#d4af37]" />
-                      <span className="text-[10px] font-black uppercase tracking-wider">Subir Arquivo</span>
-                      <span className="text-[8px] text-white/30">Foto ou Vídeo</span>
-                    </button>
-                    <input 
-                      type="file" 
-                      ref={fileInputRef} 
-                      className="hidden" 
-                      accept="image/*,video/*" 
-                      onChange={handleFileSelect} 
+                </div>
+
+                {/* Título & Subtítulo */}
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-white/50 block mb-1">
+                      Título Principal *
+                    </label>
+                    <input
+                      type="text"
+                      value={newTitle}
+                      onChange={(e) => setNewTitle(e.target.value)}
+                      placeholder="Ex: Treinamento Obrigatório de Segurança e EPIs"
+                      className="w-full bg-[#0a0e17] border border-white/10 rounded-xl px-3.5 py-2.5 text-xs font-bold text-white outline-none focus:border-[#d4af37] transition-colors"
                     />
-
-                    {/* URL Link Option */}
-                    <div className="p-3 rounded-2xl border border-white/10 bg-[#0a0e17] flex flex-col justify-center gap-1.5">
-                      <span className="text-[9px] font-black uppercase text-white/40">Ou cole link direto:</span>
-                      <input 
-                        type="url"
-                        value={newMediaUrl}
-                        onChange={(e) => {
-                          setNewMediaUrl(e.target.value);
-                          if (e.target.value) {
-                            setMediaPreview(e.target.value);
-                            setNewMediaType(e.target.value.match(/\.(mp4|webm|mov)(\?.*)?$/i) ? 'video' : 'image');
-                          }
-                        }}
-                        placeholder="https://exemplo.com/foto.jpg"
-                        className="w-full bg-[#1c2431] border border-white/10 rounded-lg px-2.5 py-1.5 text-[10px] text-white outline-none focus:border-[#d4af37]"
-                      />
-                    </div>
                   </div>
-                )}
+
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-white/50 block mb-1">
+                      Subtítulo (Opcional)
+                    </label>
+                    <input
+                      type="text"
+                      value={newSubtitle}
+                      onChange={(e) => setNewSubtitle(e.target.value)}
+                      placeholder="Ex: Todas as quintas-feiras no Canteiro Central"
+                      className="w-full bg-[#0a0e17] border border-white/10 rounded-xl px-3.5 py-2.5 text-xs text-white outline-none focus:border-[#d4af37] transition-colors"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-white/50 block mb-1">
+                      Conteúdo / Instruções *
+                    </label>
+                    <textarea
+                      value={newContent}
+                      onChange={(e) => setNewContent(e.target.value)}
+                      placeholder="Descreva as instruções detalhadas, regras, horários ou avisos gerais para todos os colaboradores..."
+                      rows={3}
+                      className="w-full bg-[#0a0e17] border border-white/10 rounded-xl p-3.5 text-xs text-white outline-none focus:border-[#d4af37] transition-colors resize-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Anexo de Mídia (Foto ou Vídeo) */}
+                <div className="space-y-2 pt-2 border-t border-white/5">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-[#d4af37] flex items-center justify-between">
+                    <span>Anexar Foto ou Vídeo</span>
+                    {mediaPreview && (
+                      <button 
+                        type="button" 
+                        onClick={removeSelectedFile}
+                        className="text-red-400 hover:underline text-[9px] lowercase font-normal"
+                      >
+                        remover mídia
+                      </button>
+                    )}
+                  </label>
+
+                  {/* Preview Box */}
+                  {mediaPreview ? (
+                    <div className="relative aspect-video rounded-2xl overflow-hidden border border-[#d4af37]/40 bg-black">
+                      {newMediaType === 'video' ? (
+                        <video src={mediaPreview} controls className="w-full h-full object-cover" />
+                      ) : (
+                        <img src={mediaPreview} alt="Preview" className="w-full h-full object-cover" />
+                      )}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      {/* Upload File Button */}
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="p-3.5 rounded-2xl border border-dashed border-white/15 hover:border-[#d4af37] bg-[#0a0e17] flex flex-col items-center justify-center gap-1.5 text-white/60 hover:text-white transition-all text-center"
+                      >
+                        <Upload size={18} className="text-[#d4af37]" />
+                        <span className="text-[10px] font-black uppercase tracking-wider">Subir Arquivo</span>
+                        <span className="text-[8px] text-white/30">Foto ou Vídeo</span>
+                      </button>
+                      <input 
+                        type="file" 
+                        ref={fileInputRef} 
+                        className="hidden" 
+                        accept="image/*,video/*" 
+                        onChange={handleFileSelect} 
+                      />
+
+                      {/* URL Link Option */}
+                      <div className="p-3 rounded-2xl border border-white/10 bg-[#0a0e17] flex flex-col justify-center gap-1.5">
+                        <span className="text-[9px] font-black uppercase text-white/40">Ou cole link direto:</span>
+                        <input 
+                          type="url"
+                          value={newMediaUrl}
+                          onChange={(e) => {
+                            setNewMediaUrl(e.target.value);
+                            if (e.target.value) {
+                              setMediaPreview(e.target.value);
+                              setNewMediaType(e.target.value.match(/\.(mp4|webm|mov)(\?.*)?$/i) ? 'video' : 'image');
+                            }
+                          }}
+                          placeholder="https://exemplo.com/foto.jpg"
+                          className="w-full bg-[#1c2431] border border-white/10 rounded-lg px-2.5 py-1.5 text-[10px] text-white outline-none focus:border-[#d4af37]"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
-              {/* Action Buttons */}
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-white/10">
+              {/* Action Buttons (Fixed Footer - Always Visible) */}
+              <div className="flex items-center justify-end gap-2.5 p-4 border-t border-white/10 bg-[#141b26] flex-shrink-0">
                 <button
                   type="button"
                   onClick={() => setShowEditor(false)}
