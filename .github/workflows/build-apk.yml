@@ -48,8 +48,8 @@ jobs:
           if [ -n "$SDKM" ]; then
             echo "Aceitando licenças via sdkmanager..."
             yes | $SDKM --licenses || true
-            echo "Instalando plataforma Android 35..."
-            $SDKM "platforms;android-35" "build-tools;35.0.0" || true
+            echo "Instalando plataforma Android 36 e ferramentas..."
+            $SDKM "platforms;android-36" "build-tools;36.0.0" "platforms;android-35" "build-tools;35.0.0" || true
           fi
 
       - name: 🟩 Configurar Node.js 22 (LTS)
