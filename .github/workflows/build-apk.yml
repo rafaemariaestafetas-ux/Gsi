@@ -52,10 +52,10 @@ jobs:
             $SDKM "platforms;android-35" "build-tools;35.0.0" || true
           fi
 
-      - name: 🟩 Configurar Node.js 20
+      - name: 🟩 Configurar Node.js 22 (LTS)
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: 📦 Instalar Dependências do Projeto
         run: npm install
