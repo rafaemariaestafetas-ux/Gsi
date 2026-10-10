@@ -94,8 +94,8 @@ export async function initializePushNotifications(): Promise<void> {
       let permStatus = await PushNotifications.checkPermissions();
       console.log('[Native FCM] Status atual de permissão:', permStatus.receive);
 
-      // Request if not granted (even if it's 'denied', prompt again in case user changed mind in settings)
-      if (permStatus.receive !== 'granted') {
+      // Request only if prompt (avoid requesting again if 'denied')
+      if (permStatus.receive === 'prompt') {
         permStatus = await PushNotifications.requestPermissions();
         console.log('[Native FCM] Novo status após solicitação:', permStatus.receive);
       }
