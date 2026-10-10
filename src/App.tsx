@@ -16,7 +16,7 @@ import Messenger from './components/Messenger';
 import FCMPushModal from './components/FCMPushModal';
 import AppUpdateModal from './components/AppUpdateModal';
 import { checkForAppUpdate, ReleaseInfo } from './services/appUpdateService';
-import { registerFCMServiceWorker, setupForegroundMessageListener, requestFCMToken, initializePushNotifications } from './services/firebaseMessaging';
+import { registerFCMServiceWorker, setupForegroundMessageListener, requestFCMToken, initializePushNotifications, configureAndroidNotificationChannel } from './services/firebaseMessaging';
 import { playNotificationSound, startIncomingCallRingtone, stopIncomingCallRingtone } from './lib/sounds';
 import { getGamificationStats } from './lib/gamification';
 import { 
@@ -85,6 +85,7 @@ export default function App() {
   const [unreadMsgCount, setUnreadMsgCount] = useState<number>(0);
   const [updateRelease, setUpdateRelease] = useState<ReleaseInfo | null>(null);
   const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
 
   // Check for app updates on launch from GitHub Releases
   useEffect(() => {
@@ -537,14 +538,24 @@ export default function App() {
   };
 
   useEffect(() => {
+    let isMounted = true;
     supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!isMounted) return;
       if (session) {
         setSession(session);
         fetchProfile(session.user.id);
       }
+      setIsInitializing(false);
+    }).catch(() => {
+      if (isMounted) setIsInitializing(false);
     });
 
+    const safetyTimer = setTimeout(() => {
+      if (isMounted) setIsInitializing(false);
+    }, 2500);
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!isMounted) return;
       if (session) {
         setSession(session);
         fetchProfile(session.user.id);
@@ -556,9 +567,14 @@ export default function App() {
         localStorage.removeItem('userRole');
         localStorage.removeItem('currentObra');
       }
+      setIsInitializing(false);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      isMounted = false;
+      clearTimeout(safetyTimer);
+      subscription.unsubscribe();
+    };
   }, []);
 
   const fetchProfile = async (userId: string) => {
@@ -793,6 +809,34 @@ export default function App() {
     e.month === new Date().getMonth() && 
     e.year === new Date().getFullYear()
   );
+
+  if (isInitializing) {
+    return (
+      <div className="min-h-screen bg-[#0a0e17] flex flex-col items-center justify-center p-4 relative overflow-hidden text-white">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(212,175,55,0.08)_0%,transparent_70%)] pointer-events-none" />
+        <motion.div
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.5 }}
+          className="flex flex-col items-center space-y-6 relative z-10"
+        >
+          <AnimatedLogo size={90} />
+          <div className="text-center space-y-2">
+            <h1 className="text-3xl font-black tracking-tighter text-white">GSI<span className="text-[#d4af37] ml-1">PRO</span></h1>
+            <p className="text-[10px] font-black text-[#d4af37] uppercase tracking-[0.4em]">A carregar sistema...</p>
+          </div>
+          <div className="w-48 h-1 bg-white/10 rounded-full overflow-hidden mt-4">
+            <motion.div 
+              className="h-full bg-[#d4af37]"
+              initial={{ x: '-100%' }}
+              animate={{ x: '100%' }}
+              transition={{ repeat: Infinity, duration: 1.2, ease: 'easeInOut' }}
+            />
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
 
   if (!session) return <Auth />;
 
