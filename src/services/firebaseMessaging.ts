@@ -84,8 +84,7 @@ export async function registerFCMServiceWorker(): Promise<ServiceWorkerRegistrat
  * 2. Request Notification Permission and obtain Token
  * Uses Native FCM (@capacitor/push-notifications) on Android and Web Push on Browsers/PWAs.
  */
-export async function requestFCMToken(userId?: string): Promise<string | null> {
-  // A. NATIVE ANDROID FLOW (Capacitor)
+export async function initializePushNotifications(): Promise<void> {
   if (Capacitor.isNativePlatform()) {
     try {
       console.log('[Native FCM] Iniciando configuração de push nativo no Android...');
@@ -95,17 +94,27 @@ export async function requestFCMToken(userId?: string): Promise<string | null> {
       let permStatus = await PushNotifications.checkPermissions();
       console.log('[Native FCM] Status atual de permissão:', permStatus.receive);
 
-      if (permStatus.receive === 'prompt' || permStatus.receive === 'prompt-with-rationale') {
+      // Request if not granted (even if it's 'denied', prompt again in case user changed mind in settings)
+      if (permStatus.receive !== 'granted') {
         permStatus = await PushNotifications.requestPermissions();
         console.log('[Native FCM] Novo status após solicitação:', permStatus.receive);
       }
 
-      if (permStatus.receive !== 'granted') {
-        console.warn('[Native FCM] Permissão de notificações não concedida pelo usuário.');
-        return null;
+      if (permStatus.receive === 'granted') {
+        await PushNotifications.register();
       }
+    } catch (err) {
+      console.warn('[Native FCM] Falha ao configurar push nativo:', err);
+    }
+  }
+}
 
-      // Register with FCM and await token
+export async function requestFCMToken(userId?: string): Promise<string | null> {
+  // A. NATIVE ANDROID FLOW (Capacitor)
+  if (Capacitor.isNativePlatform()) {
+    try {
+      // Ensure we have permissions and are registered
+      await initializePushNotifications();
       return new Promise<string | null>((resolve) => {
         let hasResolved = false;
 

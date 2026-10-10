@@ -16,7 +16,7 @@ import Messenger from './components/Messenger';
 import FCMPushModal from './components/FCMPushModal';
 import AppUpdateModal from './components/AppUpdateModal';
 import { checkForAppUpdate, ReleaseInfo } from './services/appUpdateService';
-import { registerFCMServiceWorker, setupForegroundMessageListener, requestFCMToken } from './services/firebaseMessaging';
+import { registerFCMServiceWorker, setupForegroundMessageListener, requestFCMToken, initializePushNotifications } from './services/firebaseMessaging';
 import { playNotificationSound, startIncomingCallRingtone, stopIncomingCallRingtone } from './lib/sounds';
 import { getGamificationStats } from './lib/gamification';
 import { 
@@ -111,6 +111,13 @@ export default function App() {
       isMounted = false;
       clearTimeout(timer);
     };
+  }, []);
+
+  // Initialize native features on startup
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+        initializePushNotifications();
+    }
   }, []);
 
   // Auto-register device for Web Push / FCM notifications upon login

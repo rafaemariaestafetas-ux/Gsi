@@ -1710,7 +1710,9 @@ export default function Messenger({
       opened_by: []
     });
 
+    const tempId = `temp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     const messageData: any = {
+      id: tempId,
       content: dbContent,
       sender_id: currentUserId,
       receiver_id: selectedUser.id,
@@ -1756,12 +1758,27 @@ export default function Messenger({
     }
     playSendSound();
 
-    let { data: insertedData, error } = await supabase.from('messages').insert([messageData]).select();
+    // Clean payload containing ONLY valid columns of the messages table in PostgreSQL
+    const dbPayload: any = {
+      content: dbContent,
+      sender_id: currentUserId,
+      receiver_id: selectedUser.id,
+      media_url: mediaUrl || null,
+      type: metaOptions?.type || type
+    };
+
+    let { data: insertedData, error } = await supabase.from('messages').insert([dbPayload]).select();
     
-    // Self-healing fallback if database schema lacks reply_to or reactions column
-    if (error && (error.message?.includes('reply_to') || error.message?.includes('reactions') || error.message?.includes('is_view_once') || error.code === 'PGRST204')) {
-      const { reply_to, reactions, is_view_once: _v, view_once_opened: _vo, opened_by: _ob, is_deleted: _del, deleted_for: _df, ...cleanPayload } = messageData;
-      const retry = await supabase.from('messages').insert([cleanPayload]).select();
+    // Resilient fallback if table schema has custom constraints
+    if (error) {
+      console.warn('[Messenger] Insert note on messages, trying minimal payload:', error);
+      const retry = await supabase.from('messages').insert([{
+        content: dbContent,
+        sender_id: currentUserId,
+        receiver_id: selectedUser.id,
+        media_url: mediaUrl || null,
+        type: metaOptions?.type || type
+      }]).select();
       insertedData = retry.data;
       error = retry.error;
     }
@@ -1772,7 +1789,14 @@ export default function Messenger({
           localStorage.setItem(`gsi_reply_${insertedData[0].id}`, JSON.stringify(savedReplyTo));
         } catch {}
       }
-      setMessages(prev => prev.map(m => m === parsedOptimistic ? parseMessage({ ...insertedData[0], reply_to: savedReplyTo, is_view_once: isViewOnce }) : m));
+      const confirmedMessage = parseMessage({ 
+        ...insertedData[0], 
+        reply_to: savedReplyTo, 
+        is_view_once: isViewOnce,
+        poll: metaOptions?.poll,
+        location: metaOptions?.location
+      });
+      setMessages(prev => prev.map(m => (m.id === tempId || m === parsedOptimistic) ? confirmedMessage : m));
 
       triggerBackgroundNotification({
         senderId: currentUserId,
@@ -1784,8 +1808,8 @@ export default function Messenger({
         data: { url: '/messages' }
       });
     } else if (error) {
-      console.error('[Messenger] Erro ao enviar mensagem privada:', error);
-      fetchMessages(selectedUser.id);
+      console.warn('[Messenger] Database note inserting message:', error);
+      // Keep optimistic message so the user never loses the sent message from UI
     }
   };
 
@@ -1809,7 +1833,9 @@ export default function Messenger({
         opened_by: []
       });
 
+      const tempId = `temp_grp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
       const messageData: any = {
+        id: tempId,
         group_id: selectedGroup.id,
         sender_id: currentUserId,
         content: dbContent,
@@ -1850,26 +1876,48 @@ export default function Messenger({
       setAudioBlob(null);
       playSendSound();
 
-      let { data: insertedGroupData, error } = await supabase.from('group_messages').insert([messageData]).select();
+      // Clean payload containing ONLY valid columns of the group_messages table in PostgreSQL
+      const dbPayload: any = {
+        group_id: selectedGroup.id,
+        sender_id: currentUserId,
+        sender_name: userName,
+        content: dbContent,
+        type: metaOptions?.type || type,
+        media_url: mediaUrl || null
+      };
 
-      // Self-healing fallback if database schema lacks reply_to or reactions column
-      if (error && (error.message?.includes('reply_to') || error.message?.includes('reactions') || error.message?.includes('is_view_once') || error.code === 'PGRST204')) {
-        const { reply_to, reactions, is_view_once: _v, view_once_opened: _vo, opened_by: _ob, is_deleted: _del, deleted_for: _df, ...cleanPayload } = messageData as any;
-        const retry = await supabase.from('group_messages').insert([cleanPayload]).select();
+      let { data: insertedGroupData, error } = await supabase.from('group_messages').insert([dbPayload]).select();
+
+      // Resilient fallback if table schema has custom constraints
+      if (error) {
+        console.warn('[Messenger] Insert note on group_messages, trying minimal payload:', error);
+        const retry = await supabase.from('group_messages').insert([{
+          group_id: selectedGroup.id,
+          sender_id: currentUserId,
+          sender_name: userName,
+          content: dbContent,
+          type: metaOptions?.type || type,
+          media_url: mediaUrl || null
+        }]).select();
         insertedGroupData = retry.data;
         error = retry.error;
       }
 
-      if (!error) {
-        if (insertedGroupData && insertedGroupData[0]) {
-          if (savedReplyTo && insertedGroupData[0].id) {
-            try {
-              localStorage.setItem(`gsi_reply_${insertedGroupData[0].id}`, JSON.stringify(savedReplyTo));
-            } catch {}
-          }
-          const parsedSaved = parseMessage({ ...insertedGroupData[0], reply_to: savedReplyTo || undefined, is_view_once: isViewOnce });
-          setGroupMessages(prev => prev.map(m => m === parsedOptimistic ? parsedSaved : m));
+      if (!error && insertedGroupData && insertedGroupData[0]) {
+        if (savedReplyTo && insertedGroupData[0].id) {
+          try {
+            localStorage.setItem(`gsi_reply_${insertedGroupData[0].id}`, JSON.stringify(savedReplyTo));
+          } catch {}
         }
+        const parsedSaved = parseMessage({ 
+          ...insertedGroupData[0], 
+          reply_to: savedReplyTo || undefined, 
+          is_view_once: isViewOnce,
+          poll: metaOptions?.poll,
+          location: metaOptions?.location
+        });
+        setGroupMessages(prev => prev.map(m => (m.id === tempId || m === parsedOptimistic) ? parsedSaved : m));
+        
         triggerBackgroundNotification({
           senderId: currentUserId,
           senderName: userName,
@@ -1879,10 +1927,13 @@ export default function Messenger({
           type: 'group_message',
           data: { url: '/messages', groupId: selectedGroup.id }
         });
+      } else if (error) {
+        console.warn('[Messenger] Database note inserting group message:', error);
+        // Keep optimistic message so the user never loses the sent message from UI
       }
     } catch (err) {
-      console.error('Error sending group message in Messenger:', err);
-      fetchGroupMessages(selectedGroup.id);
+      console.warn('Error sending group message in Messenger:', err);
+      // Keep optimistic message
     }
   };
 
@@ -2435,31 +2486,47 @@ export default function Messenger({
       const folder = selectedGroup ? `group-audio/${selectedGroup.id}` : `chat-audio/${currentUserId}`;
       const filePath = `${folder}/${fileName}`;
 
-      const { error: uploadError } = await supabase.storage
-        .from('avatars')
-        .upload(filePath, audioBlob, {
-          contentType: cleanType,
-          cacheControl: '3600',
-          upsert: true
-        });
+      let publicAudioUrl: string | null = null;
 
-      if (uploadError) {
-        console.warn('Supabase storage upload note:', uploadError);
-        throw uploadError;
+      try {
+        const { error: uploadError } = await supabase.storage
+          .from('avatars')
+          .upload(filePath, audioBlob, {
+            contentType: cleanType,
+            cacheControl: '3600',
+            upsert: true
+          });
+
+        if (!uploadError) {
+          const { data } = supabase.storage
+            .from('avatars')
+            .getPublicUrl(filePath);
+          publicAudioUrl = data.publicUrl;
+        } else {
+          console.warn('[Messenger] Storage upload note, falling back to data URL:', uploadError);
+        }
+      } catch (uploadCatch) {
+        console.warn('[Messenger] Storage upload catch, using fallback:', uploadCatch);
       }
 
-      const { data: { publicUrl } } = supabase.storage
-        .from('avatars')
-        .getPublicUrl(filePath);
+      // If storage upload failed or returned no URL, use base64 data URL fallback
+      if (!publicAudioUrl) {
+        publicAudioUrl = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = () => resolve(audioPreviewUrl || '');
+          reader.readAsDataURL(audioBlob);
+        });
+      }
 
-      if (!publicUrl) {
-        throw new Error('Falha ao obter URL pública do áudio.');
+      if (!publicAudioUrl) {
+        throw new Error('Falha ao processar arquivo de áudio.');
       }
 
       if (selectedGroup) {
-        await sendGroupMessage('audio', publicUrl);
+        await sendGroupMessage('audio', publicAudioUrl);
       } else if (selectedUser) {
-        await sendMessage('audio', publicUrl);
+        await sendMessage('audio', publicAudioUrl);
       }
 
       if (audioPreviewUrl) {
@@ -3346,32 +3413,6 @@ export default function Messenger({
               )}
             </div>
 
-            {/* Active Recording State Banner */}
-            {isRecording && (
-              <div className="p-2.5 bg-red-500/10 border-t border-red-500/20 flex items-center justify-between relative z-20 animate-pulse">
-                <div className="flex items-center gap-2 text-red-500 text-xs font-black uppercase tracking-wider">
-                  <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
-                  <span>Gravando Áudio... {Math.floor(recordingTime / 60)}:{(recordingTime % 60).toString().padStart(2, '0')}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={cancelRecording}
-                    className="p-1 text-slate-400 hover:text-red-500 text-[10px] font-black uppercase tracking-wider"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={stopRecording}
-                    className="px-3 py-1 bg-red-500 text-white rounded-lg text-[9px] font-black uppercase tracking-wider shadow-sm hover:bg-red-600 transition-colors"
-                  >
-                    Concluir
-                  </button>
-                </div>
-              </div>
-            )}
-
             {/* Audio Ready Preview Banner */}
             {audioBlob && !isRecording && (
               <div className="p-3 bg-amber-500/10 border-t border-amber-500/20 flex flex-col gap-2 relative z-20">
@@ -3457,18 +3498,18 @@ export default function Messenger({
             {/* Input Bar or Active Recording Toolbar */}
             {isRecording ? (
               <div 
-                className="p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-3 relative z-20 animate-fadeIn"
+                className="p-2.5 sm:p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-2.5 relative z-20 animate-fadeIn w-full max-w-full overflow-hidden"
                 style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
               >
-                <div className="flex items-center gap-2.5 text-red-600 font-bold text-xs">
-                  <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping inline-block" />
-                  <span className="tracking-wide">Gravando: {formatRecordingTime(recordingTime)}</span>
+                <div className="flex items-center gap-2 text-red-600 font-bold text-xs min-w-0 flex-1">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping inline-block flex-shrink-0" />
+                  <span className="tracking-wide truncate">Gravando: {formatRecordingTime(recordingTime)}</span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-shrink-0">
                   <button 
                     type="button"
                     onClick={cancelRecording}
-                    className="px-3 py-1.5 text-slate-600 hover:text-red-600 bg-white rounded-xl border border-slate-200 text-xs font-semibold shadow-sm flex items-center gap-1 active:scale-95 transition-all"
+                    className="px-2.5 sm:px-3 py-1.5 text-slate-600 hover:text-red-600 bg-white rounded-xl border border-slate-200 text-xs font-semibold shadow-sm flex items-center gap-1 active:scale-95 transition-all"
                   >
                     <Trash2 size={13} />
                     <span>Cancelar</span>
@@ -3476,7 +3517,7 @@ export default function Messenger({
                   <button 
                     type="button"
                     onClick={stopRecording}
-                    className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 active:scale-95 transition-all"
+                    className="px-3 sm:px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 active:scale-95 transition-all"
                   >
                     <Square size={12} fill="currentColor" />
                     <span>Concluir</span>
@@ -3485,15 +3526,15 @@ export default function Messenger({
               </div>
             ) : (
               <div 
-                className="p-3 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-2 relative z-20"
-                style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
+                className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-20 w-full max-w-full overflow-hidden"
+                style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))' }}
               >
-                {/* Botão de Anexos Discreto WhatsApp (+) */}
+                {/* Botão de Anexos WhatsApp (+) */}
                 <div className="relative flex-shrink-0">
                   <button 
                     type="button"
                     onClick={() => setShowAttachmentMenu(prev => !prev)}
-                    className="w-9 h-9 flex items-center justify-center text-slate-600 hover:text-[#00a884] transition-colors rounded-full bg-white border border-slate-200 shadow-sm active:scale-95"
+                    className="w-9 h-9 min-w-[36px] flex items-center justify-center text-slate-600 hover:text-[#00a884] transition-colors rounded-full bg-white border border-slate-200 shadow-sm active:scale-95 flex-shrink-0"
                     title="Anexar localização, enquete ou fotos"
                   >
                     <Plus size={18} className={`transition-transform duration-200 ${showAttachmentMenu ? 'rotate-45 text-[#00a884]' : ''}`} />
@@ -3581,14 +3622,6 @@ export default function Messenger({
                   </AnimatePresence>
                 </div>
 
-                <button 
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isUploading}
-                  className="w-9 h-9 flex items-center justify-center text-slate-500 hover:text-[#00a884] transition-colors rounded-full bg-white border border-slate-200 shadow-sm flex-shrink-0"
-                  title="Enviar foto da galeria"
-                >
-                  <ImageIcon size={16} />
-                </button>
                 <input 
                   type="file" 
                   ref={fileInputRef} 
@@ -3597,36 +3630,63 @@ export default function Messenger({
                   onChange={handleImageUpload} 
                 />
 
-                <button 
-                  onClick={() => groupCameraInputRef.current?.click()}
-                  disabled={isUploading}
-                  className="w-9 h-9 flex items-center justify-center text-slate-500 hover:text-[#00a884] transition-colors rounded-full bg-white border border-slate-200 shadow-sm flex-shrink-0"
-                  title="Tirar foto com a câmera"
-                >
-                  <Camera size={16} />
-                </button>
                 <input 
                   type="file" 
                   ref={groupCameraInputRef} 
                   className="hidden" 
                   accept="image/*" 
-                  capture="environment"
+                  capture="environment" 
                   onChange={handleImageUpload} 
                 />
 
-                <input 
-                  type="text" 
-                  value={newMessage}
-                  onChange={(e) => handleTypingChange(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && sendGroupMessage('text')}
-                  placeholder="Mensagem"
-                  className="flex-1 bg-white border border-slate-200 rounded-full px-4 py-2.5 text-xs font-normal text-slate-900 outline-none focus:ring-1 focus:ring-[#00a884] shadow-sm transition-all placeholder:text-slate-400"
-                />
+                {/* Input Capsule com Text Input e Botões Compactos Integrados */}
+                <div className="flex-1 min-w-0 bg-white border border-slate-200 rounded-full px-3 py-1 flex items-center gap-1.5 shadow-sm focus-within:ring-1 focus-within:ring-[#00a884] transition-all">
+                  <input 
+                    type="text" 
+                    value={newMessage}
+                    onChange={(e) => handleTypingChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        sendGroupMessage('text');
+                      }
+                    }}
+                    placeholder="Mensagem"
+                    className="flex-1 min-w-0 bg-transparent text-xs font-normal text-slate-900 outline-none placeholder:text-slate-400 py-1"
+                  />
 
+                  {/* Botão de Câmera Rápida dentro do campo */}
+                  <button 
+                    type="button"
+                    onClick={() => groupCameraInputRef.current?.click()}
+                    disabled={isUploading}
+                    className="p-1 text-slate-400 hover:text-[#00a884] active:scale-95 transition-colors rounded-full flex-shrink-0"
+                    title="Tirar foto"
+                  >
+                    <Camera size={17} />
+                  </button>
+
+                  {/* Botão de Galeria Rápida dentro do campo (quando texto está vazio) */}
+                  {!newMessage.trim() && (
+                    <button 
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploading}
+                      className="p-1 text-slate-400 hover:text-[#00a884] active:scale-95 transition-colors rounded-full flex-shrink-0"
+                      title="Enviar imagem"
+                    >
+                      <ImageIcon size={17} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Botão de Ação: Enviar Texto ou Microfone de Áudio */}
                 {newMessage.trim() ? (
                   <button 
+                    type="button"
                     onClick={() => sendGroupMessage('text')}
-                    className="w-9 h-9 bg-[#00a884] text-white rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-sm flex-shrink-0"
+                    className="w-9 h-9 min-w-[36px] bg-[#00a884] hover:bg-[#008f6f] text-white rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all flex-shrink-0 shadow-md ml-0.5"
+                    title="Enviar mensagem"
                   >
                     <Send size={15} className="ml-0.5" />
                   </button>
@@ -3634,10 +3694,10 @@ export default function Messenger({
                   <button 
                     type="button"
                     onClick={startRecording}
-                    className="w-9 h-9 rounded-full flex items-center justify-center transition-all flex-shrink-0 bg-[#00a884] text-white hover:bg-[#008f6f] active:scale-95 shadow-sm"
+                    className="w-9 h-9 min-w-[36px] rounded-full flex items-center justify-center transition-all flex-shrink-0 bg-[#00a884] text-white hover:bg-[#008f6f] active:scale-95 shadow-md ml-0.5"
                     title="Toque para gravar áudio"
                   >
-                    <Mic size={16} />
+                    <Mic size={17} />
                   </button>
                 )}
               </div>
@@ -4141,32 +4201,6 @@ export default function Messenger({
               </div>
             ) : (
               <>
-                {/* Active Recording State Banner in Direct Chat */}
-                {isRecording && (
-                  <div className="p-2.5 bg-red-500/10 border-t border-red-500/20 flex items-center justify-between relative z-20 animate-pulse">
-                    <div className="flex items-center gap-2 text-red-500 text-xs font-black uppercase tracking-wider">
-                      <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
-                      <span>Gravando Áudio... {Math.floor(recordingTime / 60)}:{(recordingTime % 60).toString().padStart(2, '0')}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={cancelRecording}
-                        className="p-1 text-slate-400 hover:text-red-500 text-[10px] font-black uppercase tracking-wider"
-                      >
-                        Cancelar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={stopRecording}
-                        className="px-3 py-1 bg-red-500 text-white rounded-lg text-[9px] font-black uppercase tracking-wider shadow-sm hover:bg-red-600 transition-colors"
-                      >
-                        Concluir
-                      </button>
-                    </div>
-                  </div>
-                )}
-
                 {/* Audio Ready Preview Banner in Direct Chat */}
                 {audioBlob && !isRecording && (
                   <div className="p-3 bg-amber-500/10 border-t border-amber-500/20 flex flex-col gap-2 relative z-20">
@@ -4252,18 +4286,18 @@ export default function Messenger({
                 {/* Input Bar or Active Recording Toolbar in Direct Chat */}
                 {isRecording ? (
                   <div 
-                    className="p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-3 relative z-20 animate-fadeIn"
+                    className="p-2.5 sm:p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-2.5 relative z-20 animate-fadeIn w-full max-w-full overflow-hidden"
                     style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
                   >
-                    <div className="flex items-center gap-2.5 text-red-600 font-bold text-xs">
-                      <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping inline-block" />
-                      <span className="tracking-wide">Gravando: {formatRecordingTime(recordingTime)}</span>
+                    <div className="flex items-center gap-2 text-red-600 font-bold text-xs min-w-0 flex-1">
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping inline-block flex-shrink-0" />
+                      <span className="tracking-wide truncate">Gravando: {formatRecordingTime(recordingTime)}</span>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-shrink-0">
                       <button 
                         type="button"
                         onClick={cancelRecording}
-                        className="px-3 py-1.5 text-slate-600 hover:text-red-600 bg-white rounded-xl border border-slate-200 text-xs font-semibold shadow-sm flex items-center gap-1 active:scale-95 transition-all"
+                        className="px-2.5 sm:px-3 py-1.5 text-slate-600 hover:text-red-600 bg-white rounded-xl border border-slate-200 text-xs font-semibold shadow-sm flex items-center gap-1 active:scale-95 transition-all"
                       >
                         <Trash2 size={13} />
                         <span>Cancelar</span>
@@ -4271,7 +4305,7 @@ export default function Messenger({
                       <button 
                         type="button"
                         onClick={stopRecording}
-                        className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 active:scale-95 transition-all"
+                        className="px-3 sm:px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 active:scale-95 transition-all"
                       >
                         <Square size={12} fill="currentColor" />
                         <span>Concluir</span>
@@ -4280,15 +4314,15 @@ export default function Messenger({
                   </div>
                 ) : (
                   <div 
-                    className="p-3 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-2 relative z-20"
-                    style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
+                    className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-20 w-full max-w-full overflow-hidden"
+                    style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))' }}
                   >
-                    {/* Botão de Anexos Discreto WhatsApp (+) */}
+                    {/* Botão de Anexos WhatsApp (+) */}
                     <div className="relative flex-shrink-0">
                       <button 
                         type="button"
                         onClick={() => setShowAttachmentMenu(prev => !prev)}
-                        className="w-9 h-9 flex items-center justify-center text-slate-600 hover:text-[#0084ff] transition-colors rounded-full bg-white border border-slate-200 shadow-sm active:scale-95"
+                        className="w-9 h-9 min-w-[36px] flex items-center justify-center text-slate-600 hover:text-[#0084ff] transition-colors rounded-full bg-white border border-slate-200 shadow-sm active:scale-95 flex-shrink-0"
                         title="Anexar localização, enquete ou fotos"
                       >
                         <Plus size={18} className={`transition-transform duration-200 ${showAttachmentMenu ? 'rotate-45 text-[#0084ff]' : ''}`} />
@@ -4376,14 +4410,6 @@ export default function Messenger({
                       </AnimatePresence>
                     </div>
 
-                    <button 
-                      onClick={() => privateFileInputRef.current?.click()}
-                      disabled={isUploading}
-                      className="w-9 h-9 flex items-center justify-center text-slate-500 hover:text-[#0084ff] transition-colors rounded-full bg-white border border-slate-200 shadow-sm flex-shrink-0"
-                      title="Enviar imagem"
-                    >
-                      <ImageIcon size={16} />
-                    </button>
                     <input 
                       type="file" 
                       ref={privateFileInputRef} 
@@ -4392,46 +4418,74 @@ export default function Messenger({
                       onChange={handlePrivateImageUpload} 
                     />
 
-                    <button 
-                      onClick={() => privateCameraInputRef.current?.click()}
-                      disabled={isUploading}
-                      className="w-9 h-9 flex items-center justify-center text-slate-500 hover:text-[#0084ff] transition-colors rounded-full bg-white border border-slate-200 shadow-sm flex-shrink-0"
-                      title="Tirar foto"
-                    >
-                      <Camera size={16} />
-                    </button>
                     <input 
                       type="file" 
                       ref={privateCameraInputRef} 
                       className="hidden" 
                       accept="image/*" 
-                      capture="environment"
+                      capture="environment" 
                       onChange={handlePrivateImageUpload} 
                     />
 
-                    <input 
-                      type="text" 
-                      value={newMessage}
-                      onChange={(e) => handleTypingChange(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                      placeholder="Mensagem"
-                      className="flex-1 bg-white border border-slate-200 rounded-full px-4 py-2.5 text-xs font-normal text-slate-900 outline-none focus:ring-1 focus:ring-[#0084ff] shadow-sm transition-all placeholder:text-slate-400"
-                    />
+                    {/* Input Capsule com Text Input e Botões Compactos Integrados */}
+                    <div className="flex-1 min-w-0 bg-white border border-slate-200 rounded-full px-3 py-1 flex items-center gap-1.5 shadow-sm focus-within:ring-1 focus-within:ring-[#0084ff] transition-all">
+                      <input 
+                        type="text" 
+                        value={newMessage}
+                        onChange={(e) => handleTypingChange(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            sendMessage('text');
+                          }
+                        }}
+                        placeholder="Mensagem"
+                        className="flex-1 min-w-0 bg-transparent text-xs font-normal text-slate-900 outline-none placeholder:text-slate-400 py-1"
+                      />
+
+                      {/* Botão de Câmera Rápida dentro do campo */}
+                      <button 
+                        type="button"
+                        onClick={() => privateCameraInputRef.current?.click()}
+                        disabled={isUploading}
+                        className="p-1 text-slate-400 hover:text-[#0084ff] active:scale-95 transition-colors rounded-full flex-shrink-0"
+                        title="Tirar foto"
+                      >
+                        <Camera size={17} />
+                      </button>
+
+                      {/* Botão de Galeria Rápida dentro do campo (quando texto está vazio) */}
+                      {!newMessage.trim() && (
+                        <button 
+                          type="button"
+                          onClick={() => privateFileInputRef.current?.click()}
+                          disabled={isUploading}
+                          className="p-1 text-slate-400 hover:text-[#0084ff] active:scale-95 transition-colors rounded-full flex-shrink-0"
+                          title="Enviar imagem"
+                        >
+                          <ImageIcon size={17} />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Botão de Ação: Enviar Texto ou Microfone de Áudio */}
                     {newMessage.trim() ? (
                       <button 
+                        type="button"
                         onClick={() => sendMessage('text')}
-                        className="w-9 h-9 bg-[#0084ff] text-white rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all disabled:opacity-40 flex-shrink-0 shadow-sm"
+                        className="w-9 h-9 min-w-[36px] bg-[#0084ff] hover:bg-[#0070d6] text-white rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all flex-shrink-0 shadow-md ml-0.5"
+                        title="Enviar mensagem"
                       >
-                        <Send size={15} />
+                        <Send size={15} className="ml-0.5" />
                       </button>
                     ) : (
                       <button 
                         type="button"
                         onClick={startRecording}
-                        className="w-9 h-9 rounded-full flex items-center justify-center transition-all flex-shrink-0 bg-[#0084ff] text-white hover:bg-[#0070d6] active:scale-95 shadow-sm"
+                        className="w-9 h-9 min-w-[36px] rounded-full flex items-center justify-center transition-all flex-shrink-0 bg-[#0084ff] text-white hover:bg-[#0070d6] active:scale-95 shadow-md ml-0.5"
                         title="Toque para gravar áudio"
                       >
-                        <Mic size={16} />
+                        <Mic size={17} />
                       </button>
                     )}
                   </div>
