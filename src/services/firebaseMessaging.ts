@@ -87,15 +87,13 @@ export async function registerFCMServiceWorker(): Promise<ServiceWorkerRegistrat
 export async function initializePushNotifications(): Promise<void> {
   if (Capacitor.isNativePlatform()) {
     try {
-      console.log('[Native FCM] Iniciando configuração de push nativo no Android...');
+      console.log('[Native FCM] Configurando canal e solicitando permissão nativa...');
       await configureAndroidNotificationChannel();
 
-      // Check existing permissions (Android 13+ POST_NOTIFICATIONS)
       let permStatus = await PushNotifications.checkPermissions();
       console.log('[Native FCM] Status atual de permissão:', permStatus.receive);
 
-      // Request only if prompt (avoid requesting again if 'denied')
-      if (permStatus.receive === 'prompt') {
+      if (permStatus.receive !== 'granted') {
         permStatus = await PushNotifications.requestPermissions();
         console.log('[Native FCM] Novo status após solicitação:', permStatus.receive);
       }
@@ -113,8 +111,15 @@ export async function requestFCMToken(userId?: string): Promise<string | null> {
   // A. NATIVE ANDROID FLOW (Capacitor)
   if (Capacitor.isNativePlatform()) {
     try {
-      // Ensure we have permissions and are registered
-      await initializePushNotifications();
+      // Check permissions first without forcing prompt on login
+      const permStatus = await PushNotifications.checkPermissions();
+      if (permStatus.receive !== 'granted') {
+        console.log('[Native FCM] Permissão não concedida ainda, ignorando registro automático no login.');
+        return localStorage.getItem('gsi_fcm_token');
+      }
+
+      await PushNotifications.register().catch(() => {});
+
       return new Promise<string | null>((resolve) => {
         let hasResolved = false;
 
@@ -122,10 +127,9 @@ export async function requestFCMToken(userId?: string): Promise<string | null> {
           if (!hasResolved) {
             hasResolved = true;
             const fallbackToken = localStorage.getItem('gsi_fcm_token');
-            console.log('[Native FCM] Timeout aguardando token, usando cache:', fallbackToken ? 'Sim' : 'Não');
             resolve(fallbackToken);
           }
-        }, 12000);
+        }, 8000);
 
         PushNotifications.addListener('registration', async (token: Token) => {
           if (hasResolved) return;
@@ -133,7 +137,6 @@ export async function requestFCMToken(userId?: string): Promise<string | null> {
           clearTimeout(timeoutId);
 
           const fcmToken = token.value;
-          console.log('[Native FCM] Token FCM nativo obtido com sucesso:', fcmToken);
           currentToken = fcmToken;
           localStorage.setItem('gsi_fcm_token', fcmToken);
           localStorage.setItem('gsi_platform', 'android');
@@ -152,11 +155,6 @@ export async function requestFCMToken(userId?: string): Promise<string | null> {
             clearTimeout(timeoutId);
             resolve(null);
           }
-        });
-
-        // Trigger native registration
-        PushNotifications.register().catch(err => {
-          console.warn('[Native FCM] PushNotifications.register falhou:', err);
         });
       });
     } catch (androidErr) {

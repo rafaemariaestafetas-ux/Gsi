@@ -113,10 +113,10 @@ export default function App() {
     };
   }, []);
 
-  // Initialize native features on startup
+  // Initialize native features on startup (excluding push prompt to prevent launch crashes)
   useEffect(() => {
     if (Capacitor.isNativePlatform()) {
-        initializePushNotifications();
+        configureAndroidNotificationChannel().catch(() => {});
     }
   }, []);
 
