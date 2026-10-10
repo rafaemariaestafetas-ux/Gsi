@@ -14,6 +14,8 @@ import SocialFeed from './components/SocialFeed';
 import ReelsView from './components/ReelsView';
 import Messenger from './components/Messenger';
 import FCMPushModal from './components/FCMPushModal';
+import AppUpdateModal from './components/AppUpdateModal';
+import { checkForAppUpdate, ReleaseInfo } from './services/appUpdateService';
 import { registerFCMServiceWorker, setupForegroundMessageListener, requestFCMToken } from './services/firebaseMessaging';
 import { playNotificationSound, startIncomingCallRingtone, stopIncomingCallRingtone } from './lib/sounds';
 import { getGamificationStats } from './lib/gamification';
@@ -50,6 +52,7 @@ import { ptBR } from 'date-fns/locale';
 import { Capacitor } from '@capacitor/core';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { App as CapApp } from '@capacitor/app';
+import { PushNotifications } from '@capacitor/push-notifications';
 
 export default function App() {
   const [session, setSession] = useState<any>(null);
@@ -80,6 +83,35 @@ export default function App() {
   const [incomingCallBanner, setIncomingCallBanner] = useState<any>(null);
   const [incomingMessageToast, setIncomingMessageToast] = useState<{ senderId: string; senderName: string; senderAvatar?: string; content: string } | null>(null);
   const [unreadMsgCount, setUnreadMsgCount] = useState<number>(0);
+  const [updateRelease, setUpdateRelease] = useState<ReleaseInfo | null>(null);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+
+  // Check for app updates on launch from GitHub Releases
+  useEffect(() => {
+    let isMounted = true;
+    const runUpdateCheck = async () => {
+      try {
+        const release = await checkForAppUpdate();
+        if (isMounted && release && release.hasUpdate) {
+          // Check if user dismissed this exact version previously in this session
+          const dismissedTag = sessionStorage.getItem('gsi_dismissed_update_tag');
+          if (dismissedTag !== release.tag_name) {
+            setUpdateRelease(release);
+            setIsUpdateModalOpen(true);
+          }
+        }
+      } catch (err) {
+        console.warn('[App] Update check failed:', err);
+      }
+    };
+
+    // Small delay (1.5s) to let the app finish booting and avoid stuttering
+    const timer = setTimeout(runUpdateCheck, 1500);
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, []);
 
   // Auto-register device for Web Push / FCM notifications upon login
   useEffect(() => {
@@ -102,6 +134,8 @@ export default function App() {
         if (incomingCallBanner) {
           stopIncomingCallRingtone();
           setIncomingCallBanner(null);
+        } else if (isUpdateModalOpen) {
+          setIsUpdateModalOpen(false);
         } else if (isMessengerOpen) {
           setIsMessengerOpen(false);
         } else if (isFCMModalOpen) {
@@ -121,9 +155,71 @@ export default function App() {
         if (removeListener) removeListener();
       };
     }
-  }, [incomingCallBanner, isMessengerOpen, isFCMModalOpen, activeTab]);
+  }, [incomingCallBanner, isUpdateModalOpen, isMessengerOpen, isFCMModalOpen, activeTab]);
 
-  // Global WebRTC calling listener: plays loud ringtone, vibrates phone and displays call modal
+  // Native Push Notifications event listeners (Capacitor Android)
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      let receiveHandle: any = null;
+      let actionHandle: any = null;
+
+      PushNotifications.addListener('pushNotificationReceived', (notification) => {
+        console.log('[Native Push] Recebida em primeiro plano:', notification);
+        const data = notification.data || {};
+        if (data.type === 'call') {
+          const signal = {
+            type: 'incoming-call',
+            senderId: data.senderId || '',
+            senderName: data.senderName || notification.title || 'Colega de Obra',
+            senderAvatar: data.senderAvatar || '',
+            callType: data.callType || 'video',
+            roomUrl: data.roomUrl || '',
+            roomName: data.roomName || ''
+          };
+          setIncomingCallSignal(signal);
+          setIncomingCallBanner(signal);
+          startIncomingCallRingtone();
+          if (navigator.vibrate) navigator.vibrate([500, 250, 500, 250, 500]);
+        } else if (data.type === 'message' || data.type === 'private_message') {
+          playNotificationSound();
+          setIncomingMessageToast({
+            senderId: data.senderId || '',
+            senderName: data.senderName || 'Colega',
+            senderAvatar: data.senderAvatar,
+            content: data.body || notification.body || 'Nova mensagem'
+          });
+        }
+      }).then(h => { receiveHandle = h; }).catch(() => {});
+
+      PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+        console.log('[Native Push] Notificação clicada:', action);
+        const data = action.notification.data || {};
+        if (data.type === 'call') {
+          const signal = {
+            type: 'incoming-call',
+            senderId: data.senderId || '',
+            senderName: data.senderName || action.notification.title || 'Colega de Obra',
+            senderAvatar: data.senderAvatar || '',
+            callType: data.callType || 'video',
+            roomUrl: data.roomUrl || '',
+            roomName: data.roomName || ''
+          };
+          setIncomingCallSignal(signal);
+          setIncomingCallBanner(signal);
+          startIncomingCallRingtone();
+        } else if (data.type === 'message' || data.type === 'private_message' || data.type === 'group_message') {
+          setIsMessengerOpen(true);
+        }
+      }).then(h => { actionHandle = h; }).catch(() => {});
+
+      return () => {
+        if (receiveHandle?.remove) receiveHandle.remove();
+        if (actionHandle?.remove) actionHandle.remove();
+      };
+    }
+  }, []);
+
+  // Global calling listener: plays loud ringtone, vibrates phone and displays call modal
   useEffect(() => {
     if (!session?.user?.id) return;
 
@@ -1059,6 +1155,7 @@ export default function App() {
                 <button
                   onClick={() => {
                     stopIncomingCallRingtone();
+                    setIncomingCallSignal({ ...incomingCallBanner, autoAccept: true });
                     setIncomingCallBanner(null);
                     setIsMessengerOpen(true);
                   }}
@@ -1129,6 +1226,19 @@ export default function App() {
         }}
         userId={session?.user?.id || ''}
       />
+
+      {updateRelease && (
+        <AppUpdateModal
+          isOpen={isUpdateModalOpen}
+          release={updateRelease}
+          onClose={() => {
+            setIsUpdateModalOpen(false);
+            if (updateRelease) {
+              sessionStorage.setItem('gsi_dismissed_update_tag', updateRelease.tag_name);
+            }
+          }}
+        />
+      )}
 
       <AnimatePresence>
         {showToast && (

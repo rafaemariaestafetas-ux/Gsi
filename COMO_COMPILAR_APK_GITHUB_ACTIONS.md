@@ -65,6 +65,41 @@ Se preferir compilar na hora sem precisar fazer commit:
 
 ---
 
+## 🏷️ Como Atualizar a Versão e Publicar Novas Releases (Auto-Update)
+
+O aplicativo sincroniza e detecta automaticamente novas versões através das **Releases e Tags do GitHub** (`https://github.com/rafaemariaestafetas-ux/Gsi/releases`).
+
+Quando você publicar uma Release no GitHub com uma tag mais alta (exemplo: `v1.0.7`), todos os dispositivos com uma versão inferior abrirão automaticamente o modal de atualização com o changelog e botão de download.
+
+### Fluxo Simplificado para Criar uma Nova Atualização:
+
+1. **Aumente a versão nos arquivos:**
+   - No `package.json`: altere `"version": "1.0.7"`
+   - No `src/version.ts`: altere `export const APP_VERSION = '1.0.7';`
+   - No `capacitor.config.ts`: altere `export const APP_VERSION = '1.0.7';`
+   - *(Opcional)* Em `android/app/build.gradle`: altere `versionName "1.0.7"` e incremente o `versionCode`.
+
+2. **Crie a Release ou Tag no GitHub:**
+   - **Opção A (Via Git Terminal)**:
+     ```bash
+     git add .
+     git commit -m "chore: bump version to v1.0.7"
+     git tag v1.0.7
+     git push origin main --tags
+     ```
+     O GitHub Actions irá compilar o APK e publicar a Release automaticamente!
+   
+   - **Opção B (Via Interface do GitHub)**:
+     1. Vá em **Releases** > **Draft a new release**.
+     2. Crie uma tag (ex: `v1.0.7`).
+     3. Anexe o APK gerado (`GSI_PRO_app-debug.apk` ou `release.apk`).
+     4. Clique em **Publish release**.
+
+3. **Pronto!**
+   Assim que a release estiver publicada com o arquivo `.apk`, ao abrirem o app, os utilizadores receberão a notificação e a tela de instalação nativa do Android.
+
+---
+
 ## 💻 Comandos Úteis Locais (Se tiver Android Studio instalado)
 
 Caso queira testar localmente em seu computador:

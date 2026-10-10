@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import DailyIframe, { DailyCall } from '@daily-co/daily-js';
 import { supabase } from '../services/supabaseClient';
 import { Profile, Message, Block, ChatGroup, GroupMember, GroupMessage, ReplyInfo, PollOption, PollData, LocationData } from '../types';
 import { 
@@ -95,12 +96,12 @@ export default function Messenger({
     selectedGroupRef.current = selectedGroup;
   }, [selectedGroup]);
   
-  // WebRTC Calling state variables
+  // Daily.co Calling state variables
   const [callState, setCallState] = useState<'idle' | 'outgoing' | 'incoming' | 'connected'>('idle');
   const [callType, setCallType] = useState<'video' | 'audio'>('video');
   const [callUser, setCallUser] = useState<Profile | null>(null);
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [callRoomUrl, setCallRoomUrl] = useState<string | null>(null);
+  const [callRoomName, setCallRoomName] = useState<string | null>(null);
   const [isCallMuted, setIsCallMuted] = useState(false);
   const [isCallCameraOff, setIsCallCameraOff] = useState(false);
 
@@ -108,49 +109,74 @@ export default function Messenger({
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
   const dialtoneRef = useRef<HTMLAudioElement | null>(null);
 
-  // Refs for WebRTC connections and video elements
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  // Refs for Daily Call Object and HTML Media Elements
+  const dailyCallRef = useRef<DailyCall | null>(null);
   const callRoomChannelRef = useRef<any>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
-  const iceCandidatesQueueRef = useRef<RTCIceCandidateInit[]>([]);
   const callStartTimeRef = useRef<number | null>(null);
   const outgoingTimeoutRef = useRef<any>(null);
 
-  // Synchronize remote video and audio streams whenever remoteStream changes or call connects
-  useEffect(() => {
-    if (remoteStream) {
-      console.log('[WebRTC] Syncing remoteStream tracks:', remoteStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
-      remoteStream.getTracks().forEach(track => {
-        track.enabled = true;
-      });
+  // Synchronize Daily.co audio and video tracks to media elements
+  const syncDailyTracks = useCallback(() => {
+    if (!dailyCallRef.current) return;
+    try {
+      const participants = dailyCallRef.current.participants();
+      if (!participants) return;
 
-      if (remoteVideoRef.current) {
-        if (remoteVideoRef.current.srcObject !== remoteStream) {
-          remoteVideoRef.current.srcObject = remoteStream;
+      // 1. Sync Local Video Preview
+      const local = participants.local;
+      if (local?.tracks?.video?.persistentTrack && localVideoRef.current) {
+        const videoTrack = local.tracks.video.persistentTrack;
+        const currentSrc = localVideoRef.current.srcObject as MediaStream | null;
+        if (!currentSrc || currentSrc.getVideoTracks()[0]?.id !== videoTrack.id) {
+          localVideoRef.current.srcObject = new MediaStream([videoTrack]);
         }
-        remoteVideoRef.current.play().catch(e => console.warn('[WebRTC] remoteVideo play error:', e));
+        localVideoRef.current.muted = true;
+        localVideoRef.current.play().catch(() => {});
       }
 
-      if (remoteAudioRef.current) {
-        if (remoteAudioRef.current.srcObject !== remoteStream) {
-          remoteAudioRef.current.srcObject = remoteStream;
+      // 2. Sync Remote Video & Audio
+      const remotes = (Object.values(participants) as any[]).filter(p => !p.local);
+      if (remotes.length > 0) {
+        const remote = remotes[0];
+
+        // Remote Video
+        if (remote?.tracks?.video?.persistentTrack && remoteVideoRef.current) {
+          const videoTrack = remote.tracks.video.persistentTrack;
+          const currentSrc = remoteVideoRef.current.srcObject as MediaStream | null;
+          if (!currentSrc || currentSrc.getVideoTracks()[0]?.id !== videoTrack.id) {
+            remoteVideoRef.current.srcObject = new MediaStream([videoTrack]);
+          }
+          remoteVideoRef.current.muted = false;
+          remoteVideoRef.current.play().catch(e => console.warn('[Daily] Remote video play note:', e));
         }
-        remoteAudioRef.current.play().catch(e => console.warn('[WebRTC] remoteAudio play error:', e));
-      }
-    }
-  }, [remoteStream, callState]);
 
-  // Synchronize local preview stream
-  useEffect(() => {
-    if (localStream && localVideoRef.current) {
-      if (localVideoRef.current.srcObject !== localStream) {
-        localVideoRef.current.srcObject = localStream;
+        // Remote Audio
+        if (remote?.tracks?.audio?.persistentTrack && remoteAudioRef.current) {
+          const audioTrack = remote.tracks.audio.persistentTrack;
+          const currentSrc = remoteAudioRef.current.srcObject as MediaStream | null;
+          if (!currentSrc || currentSrc.getAudioTracks()[0]?.id !== audioTrack.id) {
+            remoteAudioRef.current.srcObject = new MediaStream([audioTrack]);
+          }
+          remoteAudioRef.current.muted = false;
+          remoteAudioRef.current.play().catch(e => console.warn('[Daily] Remote audio play note:', e));
+        }
       }
-      localVideoRef.current.play().catch(() => {});
+    } catch (err) {
+      console.warn('[Daily] Track sync error:', err);
     }
-  }, [localStream, callState]);
+  }, []);
+
+  // Continuous track sync while call is connected
+  useEffect(() => {
+    if (callState === 'connected') {
+      syncDailyTracks();
+      const interval = setInterval(syncDailyTracks, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [callState, syncDailyTracks]);
 
   const [groupMessages, setGroupMessages] = useState<GroupMessage[]>([]);
   const [groupMembers, setGroupMembers] = useState<(GroupMember & { profile?: Profile })[]>([]);
@@ -358,6 +384,7 @@ export default function Messenger({
       poll?: PollData;
       location?: LocationData;
       type?: string;
+      [key: string]: any;
     }
   ): string => {
     let text = rawContent || '';
@@ -654,7 +681,7 @@ export default function Messenger({
 
     ch.on('broadcast', { event: 'signal' }, async ({ payload }) => {
       if (!payload || payload.senderId === currentUserId) return;
-      handleWebRTCSignal(payload);
+      handleCallSignal(payload);
     });
 
     ch.subscribe();
@@ -664,18 +691,24 @@ export default function Messenger({
   const sendSignal = async (recipientId: string, signalData: any) => {
     const payload = { ...signalData, senderId: currentUserId };
 
-    // For initial calling notifications (ringing/busy/declined), broadcast to recipient's personal signal channel
-    if (signalData.type === 'incoming-call' || signalData.type === 'call-declined' || signalData.type === 'call-busy') {
+    // For initial calling notifications (ringing/busy/declined/accepted/ended), broadcast to recipient's personal signal channel
+    if (
+      signalData.type === 'incoming-call' || 
+      signalData.type === 'call-declined' || 
+      signalData.type === 'call-busy' || 
+      signalData.type === 'call-accepted' ||
+      signalData.type === 'call-ended'
+    ) {
       const personalChannel = supabase.channel(`call-signals-${recipientId}`);
       personalChannel.subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           personalChannel.send({ type: 'broadcast', event: 'signal', payload });
-          setTimeout(() => supabase.removeChannel(personalChannel), 2500);
+          setTimeout(() => supabase.removeChannel(personalChannel), 3000);
         }
       });
     }
 
-    // Always send over the shared room channel
+    // Also send over shared room channel for redundancy
     const room = getCallRoom(recipientId);
     if (room.state === 'joined') {
       room.send({ type: 'broadcast', event: 'signal', payload });
@@ -688,16 +721,19 @@ export default function Messenger({
     }
   };
 
-  const handleWebRTCSignal = async (payload: any) => {
-    console.log('[RTC Room Signal] Received:', payload.type);
-    const { type, senderId, senderName, senderAvatar, callType: cType, sdp, candidate } = payload;
+  const handleCallSignal = async (payload: any) => {
+    console.log('[Daily Signal Processor] Received:', payload.type, payload);
+    const { type, senderId, roomUrl } = payload;
 
     switch (type) {
       case 'call-accepted':
         if (callState === 'outgoing') {
           stopDialtone();
           setCallState('connected');
-          await startCallerPeerConnection(senderId, callType);
+          if (!callStartTimeRef.current) callStartTimeRef.current = Date.now();
+          if (roomUrl && (!dailyCallRef.current || dailyCallRef.current.meetingState() !== 'joined-meeting')) {
+            await joinDailyRoom(roomUrl, callType);
+          }
         }
         break;
 
@@ -706,58 +742,20 @@ export default function Messenger({
         if (callState === 'outgoing' || callState === 'incoming') {
           stopDialtone();
           stopRingtone();
+          if (dailyCallRef.current) {
+            try { dailyCallRef.current.leave(); dailyCallRef.current.destroy(); } catch {}
+            dailyCallRef.current = null;
+          }
           setCallState('idle');
           setCallUser(null);
+          setCallRoomUrl(null);
+          setCallRoomName(null);
           alert(type === 'call-busy' ? 'O destinatário está ocupado.' : 'Chamada recusada.');
         }
         break;
 
       case 'call-ended':
         handleHangUpLocal(false);
-        break;
-
-      case 'sdp-offer':
-        if (callState === 'incoming' || callState === 'connected') {
-          setCallState('connected');
-          stopRingtone();
-          await handleIncomingOffer(sdp, senderId, cType || callType);
-        }
-        break;
-
-      case 'sdp-answer':
-        if (peerConnectionRef.current) {
-          try {
-            await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(sdp));
-            // Drain any queued ICE candidates
-            while (iceCandidatesQueueRef.current.length > 0) {
-              const cand = iceCandidatesQueueRef.current.shift();
-              if (cand) {
-                try {
-                  await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(cand));
-                } catch (e) {
-                  console.warn('[WebRTC] Drained candidate note:', e);
-                }
-              }
-            }
-          } catch (e) {
-            console.warn('[WebRTC] sdp-answer error:', e);
-          }
-        }
-        break;
-
-      case 'ice-candidate':
-        if (candidate) {
-          const pc = peerConnectionRef.current;
-          if (pc && pc.remoteDescription && pc.remoteDescription.type) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (e) {
-              console.warn('[WebRTC] addIceCandidate error:', e);
-            }
-          } else {
-            iceCandidatesQueueRef.current.push(candidate);
-          }
-        }
         break;
     }
   };
@@ -766,7 +764,7 @@ export default function Messenger({
   useEffect(() => {
     if (incomingCallSignal) {
       console.log('[Messenger] Handling global incoming call signal:', incomingCallSignal);
-      const { senderId, senderName, senderAvatar, callType: cType } = incomingCallSignal;
+      const { senderId, senderName, senderAvatar, callType: cType, roomUrl, roomName, autoAccept } = incomingCallSignal;
       
       // If we are already in an active call with someone else
       if (callState === 'connected' || (callState === 'outgoing' && callUser?.id !== senderId)) {
@@ -791,21 +789,28 @@ export default function Messenger({
       };
       setCallUser(callerProfile);
       setCallType(cType || 'video');
-      setCallState('incoming');
-      playRingtone();
+      setCallRoomUrl(roomUrl || null);
+      setCallRoomName(roomName || null);
+
+      if (autoAccept) {
+        acceptCall(incomingCallSignal);
+      } else {
+        setCallState('incoming');
+        playRingtone();
+      }
 
       if (onClearIncomingCallSignal) onClearIncomingCallSignal();
     }
   }, [incomingCallSignal]);
 
-  // WebRTC Signaling Listener for incoming calls on personal channel
+  // Daily.co Signaling Listener for incoming calls on personal channel
   useEffect(() => {
     const listenChannel = supabase.channel(`call-signals-${currentUserId}`);
     
     listenChannel
       .on('broadcast', { event: 'signal' }, async ({ payload }) => {
         console.log('[Personal Call Signaling] Received signal:', payload);
-        const { type, senderId, senderName, senderAvatar, callType: cType } = payload;
+        const { type, senderId, senderName, senderAvatar, callType: cType, roomUrl, roomName } = payload;
         
         switch (type) {
           case 'incoming-call':
@@ -827,13 +832,14 @@ export default function Messenger({
             };
             setCallUser(callerProfile);
             setCallType(cType || 'video');
+            setCallRoomUrl(roomUrl || null);
+            setCallRoomName(roomName || null);
             setCallState('incoming');
             playRingtone();
             break;
 
           default:
-            // Forward any other signal to WebRTC signal processor
-            handleWebRTCSignal(payload);
+            handleCallSignal(payload);
             break;
         }
       })
@@ -890,7 +896,9 @@ export default function Messenger({
     targetUserId: string, 
     status: 'missed' | 'declined' | 'completed', 
     type: 'video' | 'audio', 
-    duration?: number
+    duration?: number,
+    roomUrl?: string | null,
+    roomName?: string | null
   ) => {
     const contentText = status === 'missed'
       ? `Chamada de ${type === 'video' ? 'vídeo' : 'voz'} perdida`
@@ -898,8 +906,18 @@ export default function Messenger({
       ? `Chamada de ${type === 'video' ? 'vídeo' : 'voz'} recusada`
       : `Chamada de ${type === 'video' ? 'vídeo' : 'voz'} (${formatCallDuration(duration || 0)})`;
 
+    const metaExt = {
+      call_status: status,
+      call_type: type,
+      call_duration: duration,
+      room_url: roomUrl || undefined,
+      room_name: roomName || undefined
+    };
+
+    const encoded = encodeMessageContent(contentText, undefined, undefined, metaExt);
+
     const messageData: any = {
-      content: contentText,
+      content: encoded,
       sender_id: currentUserId,
       receiver_id: targetUserId,
       type: 'call_log',
@@ -961,6 +979,124 @@ export default function Messenger({
     }
   };
 
+  // Helper to provision or fallback a Daily.co room
+  const createDailyRoom = async (targetId: string, type: 'video' | 'audio'): Promise<{ roomUrl: string; roomName: string }> => {
+    const defaultName = `gsi-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    try {
+      const res = await fetch('/api/daily/room', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomName: defaultName,
+          callType: type,
+          callerId: currentUserId,
+          receiverId: targetId
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.roomUrl) {
+          return { roomUrl: data.roomUrl, roomName: data.roomName || defaultName };
+        }
+      }
+    } catch (e) {
+      console.warn('[Daily] Server room creation fallback:', e);
+    }
+    const domain = (import.meta as any).env?.VITE_DAILY_DOMAIN || 'gsi';
+    return {
+      roomUrl: `https://${domain}.daily.co/${defaultName}`,
+      roomName: defaultName
+    };
+  };
+
+  // Join Daily.co Call Object
+  const joinDailyRoom = async (url: string, type: 'video' | 'audio') => {
+    // If there is an existing call object, leave and destroy it
+    if (dailyCallRef.current) {
+      try {
+        dailyCallRef.current.leave();
+        dailyCallRef.current.destroy();
+      } catch {}
+      dailyCallRef.current = null;
+    }
+
+    console.log('[Daily.co] Creating headless call object and joining room:', url);
+    const call = DailyIframe.createCallObject({
+      audioSource: true,
+      videoSource: type === 'video',
+      dailyConfig: {
+        useDevicePreferenceCookies: false,
+      }
+    });
+    dailyCallRef.current = call;
+
+    // Attach Daily Call lifecycle events
+    call.on('joined-meeting', (evt) => {
+      console.log('[Daily.co] Joined meeting event:', evt);
+      syncDailyTracks();
+    });
+
+    call.on('participant-joined', (evt) => {
+      console.log('[Daily.co] Remote participant joined:', evt?.participant?.user_name);
+      stopDialtone();
+      setCallState('connected');
+      if (!callStartTimeRef.current) callStartTimeRef.current = Date.now();
+      syncDailyTracks();
+    });
+
+    call.on('participant-updated', () => {
+      syncDailyTracks();
+    });
+
+    call.on('track-started', (evt) => {
+      console.log('[Daily.co] Track started:', evt?.track?.kind, evt?.participant?.local ? 'local' : 'remote');
+      syncDailyTracks();
+    });
+
+    call.on('track-stopped', () => {
+      syncDailyTracks();
+    });
+
+    call.on('participant-left', (evt) => {
+      console.log('[Daily.co] Participant left:', evt?.participant?.user_name);
+      if (!evt?.participant?.local) {
+        handleHangUpLocal(false);
+      }
+    });
+
+    call.on('error', (err) => {
+      console.error('[Daily.co] Call error event:', err);
+    });
+
+    call.on('left-meeting', () => {
+      console.log('[Daily.co] Left meeting successfully');
+    });
+
+    // Mobile web audio & video unlocking
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.muted = false;
+      remoteAudioRef.current.play().catch(() => {});
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.muted = false;
+      remoteVideoRef.current.play().catch(() => {});
+    }
+
+    try {
+      await call.join({
+        url,
+        userName: userName || 'Utilizador GSI',
+        startVideoOff: type === 'audio',
+        startAudioOff: false
+      });
+      syncDailyTracks();
+    } catch (joinErr) {
+      console.error('[Daily.co] Error joining room:', joinErr);
+      alert('Não foi possível conectar à chamada Daily.co. Verifique a sua ligação.');
+      handleHangUpLocal(true);
+    }
+  };
+
   const startCall = async (type: 'video' | 'audio') => {
     if (!selectedUser) return;
     setCallUser(selectedUser);
@@ -969,26 +1105,38 @@ export default function Messenger({
     callStartTimeRef.current = null;
     playDialtone();
 
-    // Connect call room immediately
+    // 1. Create or resolve Daily room
+    const { roomUrl, roomName } = await createDailyRoom(selectedUser.id, type);
+    setCallRoomUrl(roomUrl);
+    setCallRoomName(roomName);
+
+    // 2. Connect room signaling channel
     getCallRoom(selectedUser.id);
 
-    // Auto-timeout after 45s of ringing if no answer
+    // 3. Pre-join Daily room so connection is instant when receiver answers
+    await joinDailyRoom(roomUrl, type);
+
+    // 4. Auto-timeout after 45s of ringing if no answer
     if (outgoingTimeoutRef.current) clearTimeout(outgoingTimeoutRef.current);
     outgoingTimeoutRef.current = setTimeout(() => {
       if (callState === 'outgoing') {
-        recordCallMessage(selectedUser.id, 'missed', type);
+        recordCallMessage(selectedUser.id, 'missed', type, undefined, roomUrl, roomName);
         handleHangUpLocal(true);
       }
     }, 45000);
 
+    // 5. Send call signal via Supabase
     await sendSignal(selectedUser.id, {
       type: 'incoming-call',
       senderId: currentUserId,
       senderName: userName,
       senderAvatar: userAvatar,
-      callType: type
+      callType: type,
+      roomUrl,
+      roomName
     });
 
+    // 6. Push Notification
     triggerBackgroundNotification({
       senderId: currentUserId,
       senderName: userName,
@@ -1001,30 +1149,50 @@ export default function Messenger({
         callType: type,
         senderId: currentUserId,
         senderName: userName,
-        senderAvatar: userAvatar || ''
+        senderAvatar: userAvatar || '',
+        roomUrl,
+        roomName
       }
     });
   };
 
-  const acceptCall = async () => {
-    if (!callUser) return;
+  const acceptCall = async (signalData?: any) => {
+    const targetUser = signalData?.senderId ? {
+      id: signalData.senderId,
+      full_name: signalData.senderName,
+      avatar_url: signalData.senderAvatar || '',
+      role: 'Oficial' as const,
+      current_obra: '',
+      hourly_rate: 0
+    } : callUser;
+
+    const targetUrl = signalData?.roomUrl || callRoomUrl;
+    const targetName = signalData?.roomName || callRoomName;
+    const targetType = signalData?.callType || callType;
+
+    if (!targetUser || !targetUrl) {
+      console.warn('[Daily.co] Missing callUser or roomUrl for acceptCall:', { targetUser, targetUrl });
+      return;
+    }
+
     stopRingtone();
+    setCallUser(targetUser);
+    setCallRoomUrl(targetUrl);
+    setCallRoomName(targetName);
+    setCallType(targetType);
     setCallState('connected');
     callStartTimeRef.current = Date.now();
 
-    // Explicitly unlock audio playback on mobile browsers
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.muted = false;
-      remoteAudioRef.current.play().catch(() => {});
-    }
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.muted = false;
-      remoteVideoRef.current.play().catch(() => {});
-    }
+    // Connect call room channel & send acceptance signal
+    getCallRoom(targetUser.id);
+    await sendSignal(targetUser.id, { 
+      type: 'call-accepted',
+      roomUrl: targetUrl,
+      roomName: targetName
+    });
 
-    // Connect call room channel
-    getCallRoom(callUser.id);
-    await sendSignal(callUser.id, { type: 'call-accepted' });
+    // Join Daily room
+    await joinDailyRoom(targetUrl, targetType);
   };
 
   const declineCall = async () => {
@@ -1032,252 +1200,40 @@ export default function Messenger({
     stopRingtone();
     const partnerId = callUser.id;
     const cType = callType;
+    const rUrl = callRoomUrl;
+    const rName = callRoomName;
+
     await sendSignal(partnerId, { type: 'call-declined' });
+
+    if (dailyCallRef.current) {
+      try { dailyCallRef.current.leave(); dailyCallRef.current.destroy(); } catch {}
+      dailyCallRef.current = null;
+    }
+
     setCallState('idle');
     setCallUser(null);
-    await recordCallMessage(partnerId, 'declined', cType);
-  };
-
-  const getRtcConfig = (): RTCConfiguration => ({
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      { urls: 'stun:global.stun.twilio.com:3478' },
-      {
-        urls: [
-          'turn:openrelay.metered.ca:80',
-          'turn:openrelay.metered.ca:443',
-          'turn:openrelay.metered.ca:443?transport=tcp',
-          'turns:openrelay.metered.ca:443?transport=tcp'
-        ],
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
-    ],
-    iceCandidatePoolSize: 10,
-    bundlePolicy: 'max-bundle'
-  });
-
-  const startCallerPeerConnection = async (otherUserId: string, type: 'video' | 'audio') => {
-    try {
-      // Unlock audio output
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.muted = false;
-        remoteAudioRef.current.play().catch(() => {});
-      }
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.muted = false;
-        remoteVideoRef.current.play().catch(() => {});
-      }
-
-      const constraints: MediaStreamConstraints = {
-        video: type === 'video' ? { 
-          width: { ideal: 640, max: 1280 }, 
-          height: { ideal: 480, max: 720 }, 
-          facingMode: 'user', 
-          frameRate: { ideal: 24, max: 30 } 
-        } : false,
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      stream.getAudioTracks().forEach(t => { t.enabled = true; });
-      stream.getVideoTracks().forEach(t => { t.enabled = true; });
-      setLocalStream(stream);
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.muted = true;
-        localVideoRef.current.play().catch(() => {});
-      }
-
-      const pc = new RTCPeerConnection(getRtcConfig());
-      peerConnectionRef.current = pc;
-      iceCandidatesQueueRef.current = [];
-
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          sendSignal(otherUserId, {
-            type: 'ice-candidate',
-            candidate: event.candidate.toJSON()
-          });
-        }
-      };
-
-      pc.ontrack = (event) => {
-        console.log('[WebRTC Caller] ontrack received:', event.track.kind, event.track.id);
-        event.track.enabled = true;
-        const incomingStream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-        setRemoteStream(incomingStream);
-
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = incomingStream;
-          remoteVideoRef.current.muted = false;
-          remoteVideoRef.current.play().catch(e => console.warn('[WebRTC] remoteVideo play error:', e));
-        }
-
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = incomingStream;
-          remoteAudioRef.current.muted = false;
-          remoteAudioRef.current.play().catch(e => console.warn('[WebRTC] remoteAudio play error:', e));
-        }
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        console.log('[WebRTC Caller] ICE Connection State:', pc.iceConnectionState);
-        if (pc.iceConnectionState === 'failed') {
-          pc.restartIce();
-        }
-      };
-
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: type === 'video'
-      });
-      await pc.setLocalDescription(offer);
-      await sendSignal(otherUserId, {
-        type: 'sdp-offer',
-        sdp: offer,
-        callType: type
-      });
-    } catch (err) {
-      console.error('[WebRTC] Error starting media/connection:', err);
-      alert('Erro ao aceder à câmara ou microfone.');
-      handleHangUpLocal(true);
-    }
-  };
-
-  const handleIncomingOffer = async (sdp: any, otherUserId: string, type: 'video' | 'audio') => {
-    try {
-      // Unlock audio output
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.muted = false;
-        remoteAudioRef.current.play().catch(() => {});
-      }
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.muted = false;
-        remoteVideoRef.current.play().catch(() => {});
-      }
-
-      const constraints: MediaStreamConstraints = {
-        video: type === 'video' ? { 
-          width: { ideal: 640, max: 1280 }, 
-          height: { ideal: 480, max: 720 }, 
-          facingMode: 'user', 
-          frameRate: { ideal: 24, max: 30 } 
-        } : false,
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      stream.getAudioTracks().forEach(t => { t.enabled = true; });
-      stream.getVideoTracks().forEach(t => { t.enabled = true; });
-      setLocalStream(stream);
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.muted = true;
-        localVideoRef.current.play().catch(() => {});
-      }
-
-      const pc = new RTCPeerConnection(getRtcConfig());
-      peerConnectionRef.current = pc;
-
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          sendSignal(otherUserId, {
-            type: 'ice-candidate',
-            candidate: event.candidate.toJSON()
-          });
-        }
-      };
-
-      pc.ontrack = (event) => {
-        console.log('[WebRTC Callee] ontrack received:', event.track.kind, event.track.id);
-        event.track.enabled = true;
-        const incomingStream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-        setRemoteStream(incomingStream);
-
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = incomingStream;
-          remoteVideoRef.current.muted = false;
-          remoteVideoRef.current.play().catch(e => console.warn('[WebRTC] Callee remoteVideo error:', e));
-        }
-
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = incomingStream;
-          remoteAudioRef.current.muted = false;
-          remoteAudioRef.current.play().catch(e => console.warn('[WebRTC] Callee remoteAudio error:', e));
-        }
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        console.log('[WebRTC Callee] ICE Connection State:', pc.iceConnectionState);
-        if (pc.iceConnectionState === 'failed') {
-          pc.restartIce();
-        }
-      };
-
-      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-
-      // Drain any queued ICE candidates
-      while (iceCandidatesQueueRef.current.length > 0) {
-        const cand = iceCandidatesQueueRef.current.shift();
-        if (cand) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(cand));
-          } catch (err) {
-            console.warn('[WebRTC Callee] Error applying queued candidate:', err);
-          }
-        }
-      }
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      
-      await sendSignal(otherUserId, {
-        type: 'sdp-answer',
-        sdp: answer
-      });
-    } catch (err) {
-      console.error('[WebRTC] Error handling offer:', err);
-      alert('Erro de ligação de vídeo/áudio.');
-      handleHangUpLocal(true);
-    }
+    setCallRoomUrl(null);
+    setCallRoomName(null);
+    await recordCallMessage(partnerId, 'declined', cType, undefined, rUrl, rName);
   };
 
   const toggleCallMute = () => {
-    if (localStream) {
-      const audioTrack = localStream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsCallMuted(!audioTrack.enabled);
-      }
+    if (dailyCallRef.current) {
+      const nextMuted = !isCallMuted;
+      dailyCallRef.current.setLocalAudio(!nextMuted);
+      setIsCallMuted(nextMuted);
     }
   };
 
   const toggleCallCamera = () => {
-    if (localStream) {
-      const videoTrack = localStream.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setIsCallCameraOff(!videoTrack.enabled);
+    if (dailyCallRef.current) {
+      const nextCameraOff = !isCallCameraOff;
+      dailyCallRef.current.setLocalVideo(!nextCameraOff);
+      setIsCallCameraOff(nextCameraOff);
+      if (nextCameraOff && localVideoRef.current) {
+        localVideoRef.current.srcObject = null;
+      } else {
+        syncDailyTracks();
       }
     }
   };
@@ -1295,42 +1251,56 @@ export default function Messenger({
     const previousState = callState;
     const cType = callType;
     const startTime = callStartTimeRef.current;
+    const rUrl = callRoomUrl;
+    const rName = callRoomName;
 
     if (notifyPartner && partner) {
       await sendSignal(partner.id, { type: 'call-ended' });
     }
 
-    if (localStream) {
-      localStream.getTracks().forEach(track => {
-        try { track.stop(); } catch {}
-      });
-      setLocalStream(null);
+    if (dailyCallRef.current) {
+      try {
+        dailyCallRef.current.leave();
+        dailyCallRef.current.destroy();
+      } catch (err) {
+        console.warn('[Daily.co] Destroy note:', err);
+      }
+      dailyCallRef.current = null;
     }
-    setRemoteStream(null);
 
-    if (peerConnectionRef.current) {
-      try { peerConnectionRef.current.close(); } catch {}
-      peerConnectionRef.current = null;
-    }
     if (callRoomChannelRef.current) {
       try { supabase.removeChannel(callRoomChannelRef.current); } catch {}
       callRoomChannelRef.current = null;
     }
-    iceCandidatesQueueRef.current = [];
-    callStartTimeRef.current = null;
 
+    if (localVideoRef.current) localVideoRef.current.srcObject = null;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+
+    callStartTimeRef.current = null;
     setCallState('idle');
     setCallUser(null);
+    setCallRoomUrl(null);
+    setCallRoomName(null);
     setIsCallMuted(false);
     setIsCallCameraOff(false);
 
     // Record call log to conversation
     if (partner) {
       if (previousState === 'outgoing') {
-        await recordCallMessage(partner.id, 'missed', cType);
+        await recordCallMessage(partner.id, 'missed', cType, undefined, rUrl, rName);
       } else if (previousState === 'connected' && startTime) {
         const durationSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
-        await recordCallMessage(partner.id, 'completed', cType, durationSec);
+        await recordCallMessage(partner.id, 'completed', cType, durationSec, rUrl, rName);
+        if (rName) {
+          try {
+            await fetch('/api/daily/call-status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ roomName: rName, status: 'completed', duration: durationSec })
+            });
+          } catch {}
+        }
       }
     }
   };
@@ -4612,7 +4582,7 @@ export default function Messenger({
       </div>
 
       {/* =========================================================================
-          CALLING SUITE OVERLAYS (WebRTC)
+          CALLING SUITE OVERLAYS (Daily.co)
           ========================================================================= */}
       {callState !== 'idle' && callUser && (
         <div className="absolute inset-0 bg-[#0a0e17]/95 backdrop-blur-md z-[999] flex flex-col items-center justify-between p-8 text-white">

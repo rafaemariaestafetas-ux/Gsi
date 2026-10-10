@@ -19,6 +19,8 @@ import {
   testBackgroundNotification, 
   syncRemindersWithServiceWorker 
 } from '../services/firebaseMessaging';
+import { Capacitor } from '@capacitor/core';
+import { PushNotifications } from '@capacitor/push-notifications';
 
 interface FCMPushModalProps {
   isOpen: boolean;
@@ -27,7 +29,7 @@ interface FCMPushModalProps {
 }
 
 export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalProps) {
-  const [permission, setPermission] = useState<NotificationPermission>('default');
+  const [permission, setPermission] = useState<string>('default');
   const [fcmToken, setFcmToken] = useState<string | null>(localStorage.getItem('gsi_fcm_token'));
   const [isActivating, setIsActivating] = useState(false);
   const [testCountdown, setTestCountdown] = useState<number | null>(null);
@@ -37,7 +39,12 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
-    if (typeof window !== 'undefined' && 'Notification' in window) {
+    if (Capacitor.isNativePlatform()) {
+      PushNotifications.checkPermissions().then(status => {
+        setPermission(status.receive === 'granted' ? 'granted' : 'default');
+      }).catch(() => {});
+      setFcmToken(localStorage.getItem('gsi_fcm_token'));
+    } else if (typeof window !== 'undefined' && 'Notification' in window) {
       setPermission(Notification.permission);
       setFcmToken(localStorage.getItem('gsi_fcm_token'));
     }
@@ -56,8 +63,8 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
           exitHour,
           days: activeDays
         });
-      } else if (Notification.permission === 'denied') {
-        alert('As notificações estão bloqueadas nas configurações do seu navegador ou dispositivo. Permita as notificações para receber os alertas com o app fechado.');
+      } else {
+        alert('Não foi possível ativar as notificações push. Verifique se concedeu permissão nas configurações do sistema.');
       }
     } catch (err: any) {
       console.error('Error activating FCM:', err);

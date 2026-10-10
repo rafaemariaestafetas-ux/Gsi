@@ -3,6 +3,8 @@ name: Build Android APK (GSI PRO)
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -15,11 +17,22 @@ on:
         options:
           - debug
           - release
+      create_release:
+        description: 'Publicar automaticamente como GitHub Release?'
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: 'Tag da Release (ex: v1.0.1 - opcional, se vazio usa data/commit)'
+        required: false
+        default: ''
 
 jobs:
   build-apk:
     name: Compilar APK Android
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: 📥 Clonar Repositório
@@ -107,6 +120,19 @@ jobs:
           name: GSI-PRO-Android-APK
           path: build-artifacts/*.apk
           retention-days: 30
+
+      - name: 🏷️ Publicar como GitHub Release (se for Tag ou create_release marcado)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          files: build-artifacts/*.apk
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📋 Resumo da Compilação
         run: |

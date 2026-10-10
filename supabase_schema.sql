@@ -237,3 +237,27 @@ CREATE POLICY "Usuários podem gerenciar seus tokens" ON public.user_push_tokens
 CREATE POLICY "Leitura de tokens para notificações" ON public.user_push_tokens
   FOR SELECT USING (auth.role() = 'authenticated');
 
+-- 12. Tabela de Chamadas de Vídeo e Áudio Daily.co (Calls)
+CREATE TABLE IF NOT EXISTS public.calls (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  caller_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  receiver_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  room_name TEXT NOT NULL,
+  room_url TEXT NOT NULL,
+  call_type TEXT DEFAULT 'video', -- video, audio
+  status TEXT DEFAULT 'initiated', -- initiated, connected, missed, declined, completed
+  duration INTEGER DEFAULT 0,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now())
+);
+
+ALTER TABLE public.calls ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Participantes podem visualizar chamadas" ON public.calls
+  FOR SELECT USING (auth.uid() = caller_id OR auth.uid() = receiver_id);
+
+CREATE POLICY "Usuários podem registrar chamadas" ON public.calls
+  FOR INSERT WITH CHECK (auth.uid() = caller_id);
+
+CREATE POLICY "Participantes podem atualizar status das chamadas" ON public.calls
+  FOR UPDATE USING (auth.uid() = caller_id OR auth.uid() = receiver_id);
+

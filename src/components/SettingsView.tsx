@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../services/supabaseClient';
 import { Profile } from '../types';
 import { motion } from 'motion/react';
-import { Bell, Save, ChevronLeft, Clock, Calendar, LogOut, User, HardHat, Briefcase, Euro, Phone, MapPin, Camera, Loader2, Smartphone, ShieldCheck } from 'lucide-react';
+import { Bell, Save, ChevronLeft, Clock, Calendar, LogOut, User, HardHat, Briefcase, Euro, Phone, MapPin, Camera, Loader2, Smartphone, ShieldCheck, DownloadCloud, Sparkles } from 'lucide-react';
 import FCMPushModal from './FCMPushModal';
+import AppUpdateModal from './AppUpdateModal';
+import { checkForAppUpdate, getAppVersion, ReleaseInfo } from '../services/appUpdateService';
 
 interface SettingsViewProps {
   userId: string;
@@ -17,6 +19,37 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [isFCMModalOpen, setIsFCMModalOpen] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateRelease, setUpdateRelease] = useState<ReleaseInfo | null>(null);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [currentAppVer, setCurrentAppVer] = useState('1.0.0');
+  const [updateStatusText, setUpdateStatusText] = useState<string | null>(null);
+
+  useEffect(() => {
+    getAppVersion().then(v => setCurrentAppVer(v));
+  }, []);
+
+  const handleManualCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    setUpdateStatusText(null);
+    try {
+      const release = await checkForAppUpdate();
+      if (release) {
+        setUpdateRelease(release);
+        if (release.hasUpdate) {
+          setIsUpdateModalOpen(true);
+        } else {
+          setUpdateStatusText(`O app já está atualizado (v${release.currentVersion}). Última release: ${release.tag_name || 'v' + release.latestVersion}.`);
+        }
+      } else {
+        setUpdateStatusText('Nenhuma release encontrada ou sem conexão à internet.');
+      }
+    } catch (e: any) {
+      setUpdateStatusText('Erro ao verificar atualizações.');
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
   
   // Profile State
   const [fullName, setFullName] = useState('');
@@ -334,6 +367,57 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
           </button>
         </div>
 
+        {/* Atualização Automática de APK (GitHub Releases) */}
+        <div className="bg-gradient-to-br from-[#121b2d] to-[#0a1120] border border-blue-500/20 rounded-3xl p-6 space-y-4 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-blue-500/15 rounded-xl text-blue-400 border border-blue-500/30">
+                <DownloadCloud size={20} />
+              </div>
+              <div>
+                <h3 className="text-xs font-black uppercase tracking-widest text-white flex items-center gap-2">
+                  Atualização do Aplicativo
+                  <span className="text-[8px] bg-blue-500/20 text-blue-300 border border-blue-400/30 px-1.5 py-0.5 rounded font-mono font-bold">
+                    v{currentAppVer}
+                  </span>
+                </h3>
+                <p className="text-[10px] text-white/50 font-medium mt-0.5">
+                  Repositório: rafaemariaestafetas-ux/Gsi
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <p className="text-xs text-white/60 leading-relaxed">
+            O aplicativo busca automaticamente novas versões publicadas no GitHub. Você também pode verificar manualmente agora:
+          </p>
+
+          <button
+            type="button"
+            onClick={handleManualCheckUpdate}
+            disabled={checkingUpdate}
+            className="w-full py-3.5 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-300 hover:text-white font-black uppercase text-[11px] tracking-wider rounded-2xl transition-all flex items-center justify-center gap-2 active:scale-98 disabled:opacity-50"
+          >
+            {checkingUpdate ? (
+              <>
+                <Loader2 size={15} className="animate-spin text-blue-400" />
+                A consultar GitHub Releases...
+              </>
+            ) : (
+              <>
+                <Sparkles size={15} className="text-blue-400" />
+                Verificar Atualizações Agora
+              </>
+            )}
+          </button>
+
+          {updateStatusText && (
+            <p className="text-center text-[11px] text-slate-300 font-medium py-1">
+              {updateStatusText}
+            </p>
+          )}
+        </div>
+
         <div className="space-y-6">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-[#d4af37]/10 rounded-lg text-[#d4af37]"><Clock size={20} /></div>
@@ -408,6 +492,14 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
         onClose={() => setIsFCMModalOpen(false)} 
         userId={userId} 
       />
+
+      {updateRelease && (
+        <AppUpdateModal
+          isOpen={isUpdateModalOpen}
+          release={updateRelease}
+          onClose={() => setIsUpdateModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
