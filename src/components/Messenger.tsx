@@ -38,13 +38,20 @@ import {
   BarChart2,
   Paperclip,
   ExternalLink,
-  Plus
+  Plus,
+  Palette
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { AudioPlayer } from './AudioPlayer';
 import { UniversalAudioRecorder } from '../lib/audioRecorder';
 import { triggerBackgroundNotification } from '../services/firebaseMessaging';
+import { triggerLightHaptic, triggerMediumHaptic, triggerSuccessHaptic, triggerWarningHaptic, triggerMessageReceivedHaptic } from '../lib/haptics';
+import { captureNativePhoto } from '../lib/cameraService';
+import { getCurrentLocation } from '../lib/locationService';
+import { Capacitor } from '@capacitor/core';
+import { Keyboard } from '@capacitor/keyboard';
+import { CHAT_THEMES, ChatThemeId, getStoredChatTheme, setStoredChatTheme } from '../lib/chatThemes';
 
 interface MessengerProps {
   onClose: () => void;
@@ -224,6 +231,55 @@ export default function Messenger({
   const [isImagePreviewModalOpen, setIsImagePreviewModalOpen] = useState(false);
   const [imageTargetIsGroup, setImageTargetIsGroup] = useState(false);
   const [activeViewOnceImage, setActiveViewOnceImage] = useState<Message | GroupMessage | null>(null);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  // Chat Theme State (Clássico WhatsApp claro por defeito, customizável em tempo real)
+  const [chatThemeId, setChatThemeId] = useState<ChatThemeId>(getStoredChatTheme);
+  const [showThemeModal, setShowThemeModal] = useState(false);
+  const currentTheme = CHAT_THEMES[chatThemeId] || CHAT_THEMES.classic;
+
+  const handleSelectTheme = (newThemeId: ChatThemeId) => {
+    triggerLightHaptic();
+    setChatThemeId(newThemeId);
+    setStoredChatTheme(newThemeId);
+  };
+
+  // Keyboard plugin integration for native Android
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      let showHandle: any = null;
+      let hideHandle: any = null;
+
+      Keyboard.addListener('keyboardWillShow', (info) => {
+        setKeyboardHeight(info.keyboardHeight || 0);
+        setTimeout(() => {
+          scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
+          groupScrollRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+      }).then(h => { showHandle = h; }).catch(() => {});
+
+      Keyboard.addListener('keyboardDidShow', (info) => {
+        setKeyboardHeight(info.keyboardHeight || 0);
+        setTimeout(() => {
+          scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
+          groupScrollRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 50);
+      }).then(h => { showHandle = h; }).catch(() => {});
+
+      Keyboard.addListener('keyboardWillHide', () => {
+        setKeyboardHeight(0);
+      }).then(h => { hideHandle = h; }).catch(() => {});
+
+      Keyboard.addListener('keyboardDidHide', () => {
+        setKeyboardHeight(0);
+      }).then(h => { hideHandle = h; }).catch(() => {});
+
+      return () => {
+        if (showHandle?.remove) showHandle.remove();
+        if (hideHandle?.remove) hideHandle.remove();
+      };
+    }
+  }, []);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const groupScrollRef = useRef<HTMLDivElement>(null);
@@ -452,6 +508,7 @@ export default function Messenger({
               });
               markMessagesAsRead(selectedUser.id);
               playReceiveSound();
+              triggerMessageReceivedHaptic();
               setIsPartnerTyping(false);
             }
           }
@@ -542,6 +599,7 @@ export default function Messenger({
               });
               markGroupAsRead(selectedGroup.id);
               playReceiveSound();
+              triggerMessageReceivedHaptic();
             }
           }
         })
@@ -1175,6 +1233,7 @@ export default function Messenger({
       return;
     }
 
+    triggerSuccessHaptic();
     stopRingtone();
     setCallUser(targetUser);
     setCallRoomUrl(targetUrl);
@@ -1197,6 +1256,7 @@ export default function Messenger({
 
   const declineCall = async () => {
     if (!callUser) return;
+    triggerWarningHaptic();
     stopRingtone();
     const partnerId = callUser.id;
     const cType = callType;
@@ -1940,41 +2000,37 @@ export default function Messenger({
   // Send GPS Location
   const sendLocationMessage = async () => {
     setShowAttachmentMenu(false);
-    if (!navigator.geolocation) {
-      alert('Geolocalização não é suportada pelo seu dispositivo.');
-      return;
+    triggerLightHaptic();
+
+    try {
+      const coords = await getCurrentLocation({ enableHighAccuracy: true, timeout: 10000 });
+      const lat = coords.latitude;
+      const lng = coords.longitude;
+      const locData: LocationData = {
+        latitude: lat,
+        longitude: lng,
+        address: `GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}`
+      };
+
+      const displayContent = `📍 Localização Partilhada: https://maps.google.com/?q=${lat},${lng}`;
+
+      if (selectedGroup) {
+        await sendGroupMessage('location', undefined, displayContent, {
+          location: locData,
+          type: 'location'
+        });
+      } else if (selectedUser) {
+        await sendMessage('location', undefined, displayContent, {
+          location: locData,
+          type: 'location'
+        });
+      }
+      await triggerSuccessHaptic();
+    } catch (err) {
+      console.warn('Erro ao obter localização:', err);
+      await triggerWarningHaptic();
+      alert('Não foi possível obter o GPS. Certifique-se de que a localização está ativada no celular.');
     }
-
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        const locData: LocationData = {
-          latitude: lat,
-          longitude: lng,
-          address: `GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}`
-        };
-
-        const displayContent = `📍 Localização Partilhada: https://maps.google.com/?q=${lat},${lng}`;
-
-        if (selectedGroup) {
-          await sendGroupMessage('location', undefined, displayContent, {
-            location: locData,
-            type: 'location'
-          });
-        } else if (selectedUser) {
-          await sendMessage('location', undefined, displayContent, {
-            location: locData,
-            type: 'location'
-          });
-        }
-      },
-      (err) => {
-        console.warn('Erro ao obter localização:', err);
-        alert('Não foi possível obter o GPS. Certifique-se de que a localização está ativada no celular.');
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-    );
   };
 
   // Vote on a Poll Option
@@ -2261,10 +2317,7 @@ export default function Messenger({
   };
 
   // WhatsApp-Style Image Selection & Preview Composer Handlers
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>, isGroup: boolean = false) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const openImageFilePreview = (file: File, isGroup: boolean = false) => {
     const reader = new FileReader();
     reader.onload = () => {
       setSelectedImagePreview(reader.result as string);
@@ -2275,8 +2328,47 @@ export default function Messenger({
       setIsImagePreviewModalOpen(true);
     };
     reader.readAsDataURL(file);
+  };
 
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>, isGroup: boolean = false) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    openImageFilePreview(file, isGroup);
     e.target.value = '';
+  };
+
+  const handleNativeCameraClick = async (isGroup: boolean) => {
+    setShowAttachmentMenu(false);
+    triggerLightHaptic();
+    if (Capacitor.isNativePlatform()) {
+      const file = await captureNativePhoto('camera');
+      if (file) {
+        openImageFilePreview(file, isGroup);
+      }
+    } else {
+      if (isGroup) {
+        groupCameraInputRef.current?.click();
+      } else {
+        privateCameraInputRef.current?.click();
+      }
+    }
+  };
+
+  const handleNativeGalleryClick = async (isGroup: boolean) => {
+    setShowAttachmentMenu(false);
+    triggerLightHaptic();
+    if (Capacitor.isNativePlatform()) {
+      const file = await captureNativePhoto('photos');
+      if (file) {
+        openImageFilePreview(file, isGroup);
+      }
+    } else {
+      if (isGroup) {
+        fileInputRef.current?.click();
+      } else {
+        privateFileInputRef.current?.click();
+      }
+    }
   };
 
   const handleSendPreviewImage = async () => {
@@ -2730,7 +2822,17 @@ export default function Messenger({
             </>
           )}
 
-          {/* WhatsApp Options Menu (Limpar Conversa / Bloquear) */}
+          {/* Theme Palette Switcher Button */}
+          <button 
+            type="button"
+            onClick={() => setShowThemeModal(true)}
+            className="p-2.5 hover:bg-white/5 text-[#d4af37] hover:scale-105 active:scale-[0.97] rounded-xl transition-all"
+            title="Alterar Tema do Chat"
+          >
+            <Palette size={18} />
+          </button>
+
+          {/* WhatsApp Options Menu (Limpar Conversa / Bloquear / Tema) */}
           {(selectedUser || selectedGroup) && (
             <div className="relative">
               <button
@@ -2743,14 +2845,26 @@ export default function Messenger({
               </button>
 
               {showChatOptionsMenu && (
-                <div className="absolute right-0 top-full mt-1 w-48 bg-[#233138] border border-white/10 rounded-2xl shadow-2xl py-1.5 z-50 animate-fadeIn text-xs">
+                <div className="absolute right-0 top-full mt-1 w-52 bg-[#1c2431] border border-white/10 rounded-2xl shadow-2xl py-1.5 z-50 animate-fadeIn text-xs">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowChatOptionsMenu(false);
+                      setShowThemeModal(true);
+                    }}
+                    className="w-full px-4 py-2.5 text-left text-slate-200 hover:text-[#d4af37] hover:bg-white/5 flex items-center gap-2.5 transition-colors font-semibold"
+                  >
+                    <Palette size={15} className="text-[#d4af37]" />
+                    <span>Tema do chat</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
                       setShowChatOptionsMenu(false);
                       setIsClearChatModalOpen(true);
                     }}
-                    className="w-full px-4 py-2.5 text-left text-slate-200 hover:text-red-400 hover:bg-white/5 flex items-center gap-2.5 transition-colors font-semibold"
+                    className="w-full px-4 py-2.5 text-left text-slate-200 hover:text-red-400 hover:bg-white/5 flex items-center gap-2.5 transition-colors border-t border-white/5 font-semibold"
                   >
                     <Trash2 size={15} className="text-red-400" />
                     <span>Limpar conversa</span>
@@ -2953,12 +3067,13 @@ export default function Messenger({
 
         {/* 1. GROUPS VIEW (GROUP CONVERSATION) */}
         {selectedGroup ? (
-          <div className="flex-1 flex flex-col overflow-hidden bg-[#efeae2]">
-            {/* WhatsApp Custom Light Pattern Background */}
+          <div className={`flex-1 flex flex-col overflow-hidden transition-colors duration-200 ${currentTheme.containerBg}`}>
+            {/* Pattern Background with theme opacity */}
             <div 
-              className="absolute inset-0 opacity-40 pointer-events-none" 
+              className="absolute inset-0 pointer-events-none transition-opacity duration-200" 
               style={{ 
-                backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")', 
+                opacity: currentTheme.patternOpacity,
+                backgroundImage: `url("${currentTheme.patternUrl}")`, 
                 backgroundSize: '360px',
                 backgroundRepeat: 'repeat'
               }} 
@@ -3048,21 +3163,25 @@ export default function Messenger({
                             setReactionMenuMessageId(msg.id);
                           }}
                           className={`
-                            px-3.5 py-2 rounded-2xl shadow-sm relative text-xs cursor-pointer select-none group
+                            px-3.5 py-2 rounded-2xl shadow-sm relative text-xs cursor-pointer select-none group transition-colors duration-150
                             ${isMe 
-                              ? 'bg-[#d9fdd3] text-[#111b21] rounded-tr-none border border-[#c2f0b9]' 
-                              : 'bg-white text-[#111b21] rounded-tl-none border border-slate-200/80'
+                              ? `${currentTheme.bubbleMyBg} ${currentTheme.bubbleMyText} rounded-tr-none border ${currentTheme.bubbleMyBorder}` 
+                              : `${currentTheme.bubbleOtherBg} ${currentTheme.bubbleOtherText} rounded-tl-none border ${currentTheme.bubbleOtherBorder}`
                             }
                           `}
                         >
                           {/* Triangle Tip */}
-                          <div className={`
-                            absolute top-0 w-2.5 h-2.5 
-                            ${isMe 
-                              ? 'left-full -ml-1 border-l-[8px] border-l-[#d9fdd3] border-b-[8px] border-b-transparent' 
-                              : 'right-full -mr-1 border-r-[8px] border-r-white border-b-[8px] border-b-transparent'
-                            }
-                          `} />
+                          <div 
+                            className={`
+                              absolute top-0 w-2.5 h-2.5 
+                              ${isMe ? 'left-full -ml-1 border-b-[8px] border-b-transparent' : 'right-full -mr-1 border-b-[8px] border-b-transparent'}
+                            `}
+                            style={isMe ? {
+                              borderLeft: `8px solid ${currentTheme.bubbleMyTipColor}`
+                            } : {
+                              borderRight: `8px solid ${currentTheme.bubbleOtherTipColor}`
+                            }}
+                          />
 
                           {/* WhatsApp Floating Reactions Menu with Delete Action */}
                           {reactionMenuMessageId === msg.id && (
@@ -3499,7 +3618,7 @@ export default function Messenger({
             {isRecording ? (
               <div 
                 className="p-2.5 sm:p-3 bg-red-50 border-t border-red-200 flex items-center justify-between gap-2.5 relative z-20 animate-fadeIn w-full max-w-full overflow-hidden"
-                style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
+                style={{ paddingBottom: `calc(${keyboardHeight > 0 ? `${keyboardHeight}px` : '0.75rem'} + env(safe-area-inset-bottom, 0px))` }}
               >
                 <div className="flex items-center gap-2 text-red-600 font-bold text-xs min-w-0 flex-1">
                   <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-ping inline-block flex-shrink-0" />
@@ -3526,8 +3645,8 @@ export default function Messenger({
               </div>
             ) : (
               <div 
-                className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-20 w-full max-w-full overflow-hidden"
-                style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))' }}
+                className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-20 w-full max-w-full overflow-hidden transition-all duration-150"
+                style={{ paddingBottom: `calc(${keyboardHeight > 0 ? `${keyboardHeight}px` : '0.5rem'} + env(safe-area-inset-bottom, 0px))` }}
               >
                 {/* Botão de Anexos WhatsApp (+) */}
                 <div className="relative flex-shrink-0">
@@ -3585,10 +3704,7 @@ export default function Messenger({
                         {/* 3. Câmera */}
                         <button
                           type="button"
-                          onClick={() => {
-                            setShowAttachmentMenu(false);
-                            groupCameraInputRef.current?.click();
-                          }}
+                          onClick={() => handleNativeCameraClick(true)}
                           className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
                         >
                           <div className="w-9 h-9 rounded-xl bg-pink-500/20 text-pink-400 border border-pink-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -3603,10 +3719,7 @@ export default function Messenger({
                         {/* 4. Galeria */}
                         <button
                           type="button"
-                          onClick={() => {
-                            setShowAttachmentMenu(false);
-                            fileInputRef.current?.click();
-                          }}
+                          onClick={() => handleNativeGalleryClick(true)}
                           className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
                         >
                           <div className="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -3658,7 +3771,7 @@ export default function Messenger({
                   {/* Botão de Câmera Rápida dentro do campo */}
                   <button 
                     type="button"
-                    onClick={() => groupCameraInputRef.current?.click()}
+                    onClick={() => handleNativeCameraClick(true)}
                     disabled={isUploading}
                     className="p-1 text-slate-400 hover:text-[#00a884] active:scale-95 transition-colors rounded-full flex-shrink-0"
                     title="Tirar foto"
@@ -3670,7 +3783,7 @@ export default function Messenger({
                   {!newMessage.trim() && (
                     <button 
                       type="button"
-                      onClick={() => fileInputRef.current?.click()}
+                      onClick={() => handleNativeGalleryClick(true)}
                       disabled={isUploading}
                       className="p-1 text-slate-400 hover:text-[#00a884] active:scale-95 transition-colors rounded-full flex-shrink-0"
                       title="Enviar imagem"
@@ -3705,12 +3818,13 @@ export default function Messenger({
           </div>
         ) : selectedUser ? (
           /* 2. DIRECT PRIVATE CHAT */
-          <div className="flex-1 flex flex-col overflow-hidden bg-[#efeae2]">
-            {/* WhatsApp Custom Light Pattern Background */}
+          <div className={`flex-1 flex flex-col overflow-hidden transition-colors duration-200 ${currentTheme.containerBg}`}>
+            {/* Pattern Background with theme opacity */}
             <div 
-              className="absolute inset-0 opacity-40 pointer-events-none" 
+              className="absolute inset-0 pointer-events-none transition-opacity duration-200" 
               style={{ 
-                backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")', 
+                opacity: currentTheme.patternOpacity,
+                backgroundImage: `url("${currentTheme.patternUrl}")`, 
                 backgroundSize: '360px',
                 backgroundRepeat: 'repeat'
               }} 
@@ -3783,21 +3897,25 @@ export default function Messenger({
                             setReactionMenuMessageId(msg.id);
                           }}
                           className={`
-                            px-3.5 py-2 rounded-2xl shadow-sm relative text-xs cursor-pointer select-none group
+                            px-3.5 py-2 rounded-2xl shadow-sm relative text-xs cursor-pointer select-none group transition-colors duration-150
                             ${isMe 
-                              ? 'bg-[#d9fdd3] text-[#111b21] rounded-tr-none border border-[#c2f0b9]' 
-                              : 'bg-white text-[#111b21] rounded-tl-none border border-slate-200/80'
+                              ? `${currentTheme.bubbleMyBg} ${currentTheme.bubbleMyText} rounded-tr-none border ${currentTheme.bubbleMyBorder}` 
+                              : `${currentTheme.bubbleOtherBg} ${currentTheme.bubbleOtherText} rounded-tl-none border ${currentTheme.bubbleOtherBorder}`
                             }
                           `}
                         >
                           {/* Triangle Tip */}
-                          <div className={`
-                            absolute top-0 w-2.5 h-2.5 
-                            ${isMe 
-                              ? 'left-full -ml-1 border-l-[8px] border-l-[#d9fdd3] border-b-[8px] border-b-transparent' 
-                              : 'right-full -mr-1 border-r-[8px] border-r-white border-b-[8px] border-b-transparent'
-                            }
-                          `} />
+                          <div 
+                            className={`
+                              absolute top-0 w-2.5 h-2.5 
+                              ${isMe ? 'left-full -ml-1 border-b-[8px] border-b-transparent' : 'right-full -mr-1 border-b-[8px] border-b-transparent'}
+                            `}
+                            style={isMe ? {
+                              borderLeft: `8px solid ${currentTheme.bubbleMyTipColor}`
+                            } : {
+                              borderRight: `8px solid ${currentTheme.bubbleOtherTipColor}`
+                            }}
+                          />
 
                           {/* WhatsApp Floating Reactions Menu */}
                           {reactionMenuMessageId === msg.id && (
@@ -4314,8 +4432,8 @@ export default function Messenger({
                   </div>
                 ) : (
                   <div 
-                    className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-20 w-full max-w-full overflow-hidden"
-                    style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom, 0px))' }}
+                    className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-20 w-full max-w-full overflow-hidden transition-all duration-150"
+                    style={{ paddingBottom: `calc(${keyboardHeight > 0 ? `${keyboardHeight}px` : '0.5rem'} + env(safe-area-inset-bottom, 0px))` }}
                   >
                     {/* Botão de Anexos WhatsApp (+) */}
                     <div className="relative flex-shrink-0">
@@ -4373,10 +4491,7 @@ export default function Messenger({
                             {/* 3. Câmera */}
                             <button
                               type="button"
-                              onClick={() => {
-                                setShowAttachmentMenu(false);
-                                privateCameraInputRef.current?.click();
-                              }}
+                              onClick={() => handleNativeCameraClick(false)}
                               className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
                             >
                               <div className="w-9 h-9 rounded-xl bg-pink-500/20 text-pink-400 border border-pink-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -4391,10 +4506,7 @@ export default function Messenger({
                             {/* 4. Galeria */}
                             <button
                               type="button"
-                              onClick={() => {
-                                setShowAttachmentMenu(false);
-                                privateFileInputRef.current?.click();
-                              }}
+                              onClick={() => handleNativeGalleryClick(false)}
                               className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
                             >
                               <div className="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -4446,7 +4558,7 @@ export default function Messenger({
                       {/* Botão de Câmera Rápida dentro do campo */}
                       <button 
                         type="button"
-                        onClick={() => privateCameraInputRef.current?.click()}
+                        onClick={() => handleNativeCameraClick(false)}
                         disabled={isUploading}
                         className="p-1 text-slate-400 hover:text-[#0084ff] active:scale-95 transition-colors rounded-full flex-shrink-0"
                         title="Tirar foto"
@@ -4458,7 +4570,7 @@ export default function Messenger({
                       {!newMessage.trim() && (
                         <button 
                           type="button"
-                          onClick={() => privateFileInputRef.current?.click()}
+                          onClick={() => handleNativeGalleryClick(false)}
                           disabled={isUploading}
                           className="p-1 text-slate-400 hover:text-[#0084ff] active:scale-95 transition-colors rounded-full flex-shrink-0"
                           title="Enviar imagem"

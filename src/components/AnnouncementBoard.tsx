@@ -27,7 +27,8 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { triggerBackgroundNotification } from '../services/firebaseMessaging';
+import { triggerBackgroundNotification, requestNativeNotificationPermission, checkNativeNotificationPermission } from '../services/firebaseMessaging';
+import { Capacitor } from '@capacitor/core';
 
 interface AnnouncementBoardProps {
   isAdmin: boolean;
@@ -144,9 +145,15 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
   const [isPosting, setIsPosting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [notificationsEnabled, setNotificationsEnabled] = useState(
-    typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted'
-  );
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      checkNativeNotificationPermission().then(granted => {
+        setNotificationsEnabled(granted);
+      });
+    }
+  }, []);
 
   const SLIDE_DURATION = 8000; // 8 seconds per slide
 
@@ -343,9 +350,11 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
   };
 
   const requestNotificationPermission = async () => {
-    if (!('Notification' in window)) return;
-    const permission = await Notification.requestPermission();
-    setNotificationsEnabled(permission === 'granted');
+    if (!Capacitor.isNativePlatform()) return;
+    const token = await requestNativeNotificationPermission(userId);
+    if (token) {
+      setNotificationsEnabled(true);
+    }
   };
 
   const slideVariants = {
@@ -385,7 +394,7 @@ export default function AnnouncementBoard({ isAdmin, userId, userName }: Announc
             </span>
           </div>
 
-          {!notificationsEnabled && typeof window !== 'undefined' && 'Notification' in window && (
+          {!notificationsEnabled && Capacitor.isNativePlatform() && (
             <button 
               onClick={requestNotificationPermission}
               className="ml-2 flex items-center gap-1 px-2.5 py-1 bg-amber-500/10 text-amber-400 rounded-lg text-[9px] font-black uppercase tracking-wider hover:bg-amber-500 hover:text-black transition-all border border-amber-500/20"

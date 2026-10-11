@@ -31,6 +31,10 @@ import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { AudioPlayer } from './AudioPlayer';
 import { triggerBackgroundNotification } from '../services/firebaseMessaging';
+import { triggerLightHaptic, triggerSuccessHaptic, triggerWarningHaptic, triggerMessageReceivedHaptic } from '../lib/haptics';
+import { captureNativePhoto } from '../lib/cameraService';
+import { getCurrentLocation } from '../lib/locationService';
+import { Capacitor } from '@capacitor/core';
 
 interface GroupChatProps {
   currentUserId: string;
@@ -444,33 +448,29 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
   // Send GPS Location
   const sendLocationMessage = async () => {
     setShowAttachmentMenu(false);
-    if (!navigator.geolocation) {
-      alert('Geolocalização não é suportada pelo seu dispositivo.');
-      return;
+    triggerLightHaptic();
+
+    try {
+      const coords = await getCurrentLocation({ enableHighAccuracy: true, timeout: 10000 });
+      const lat = coords.latitude;
+      const lng = coords.longitude;
+      const locData: LocationData = {
+        latitude: lat,
+        longitude: lng,
+        address: `GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}`
+      };
+
+      const displayContent = `📍 Localização Partilhada: https://maps.google.com/?q=${lat},${lng}`;
+      await handleSendMessage('location', undefined, displayContent, {
+        location: locData,
+        type: 'location'
+      });
+      await triggerSuccessHaptic();
+    } catch (err) {
+      console.warn('Erro ao obter localização:', err);
+      await triggerWarningHaptic();
+      alert('Não foi possível obter o GPS. Certifique-se de que a localização está ativada no celular.');
     }
-
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        const locData: LocationData = {
-          latitude: lat,
-          longitude: lng,
-          address: `GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}`
-        };
-
-        const displayContent = `📍 Localização Partilhada: https://maps.google.com/?q=${lat},${lng}`;
-        await handleSendMessage('location', undefined, displayContent, {
-          location: locData,
-          type: 'location'
-        });
-      },
-      (err) => {
-        console.warn('Erro ao obter localização:', err);
-        alert('Não foi possível obter o GPS. Certifique-se de que a localização está ativada no celular.');
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-    );
   };
 
   // Vote on a Poll Option
@@ -574,11 +574,10 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
     }
   };
 
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleImageFileSend = async (file: File) => {
     if (!file || !selectedGroup) return;
 
-    const fileExt = file.name.split('.').pop();
+    const fileExt = file.name.split('.').pop() || 'jpg';
     const fileName = `${Math.random()}.${fileExt}`;
     const filePath = `group-media/${selectedGroup.id}/${fileName}`;
 
@@ -589,8 +588,44 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
     if (!uploadError) {
       const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(filePath);
       handleSendMessage('image', publicUrl);
+      await triggerSuccessHaptic();
     } else {
+      await triggerWarningHaptic();
       alert('Erro ao carregar imagem.');
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      await handleImageFileSend(file);
+    }
+    e.target.value = '';
+  };
+
+  const handleNativeCameraGroup = async () => {
+    setShowAttachmentMenu(false);
+    triggerLightHaptic();
+    if (Capacitor.isNativePlatform()) {
+      const file = await captureNativePhoto('camera');
+      if (file) {
+        await handleImageFileSend(file);
+      }
+    } else {
+      cameraInputRef.current?.click();
+    }
+  };
+
+  const handleNativeGalleryGroup = async () => {
+    setShowAttachmentMenu(false);
+    triggerLightHaptic();
+    if (Capacitor.isNativePlatform()) {
+      const file = await captureNativePhoto('photos');
+      if (file) {
+        await handleImageFileSend(file);
+      }
+    } else {
+      fileInputRef.current?.click();
     }
   };
 
@@ -1404,10 +1439,7 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                           {/* 3. Câmera */}
                           <button
                             type="button"
-                            onClick={() => {
-                              setShowAttachmentMenu(false);
-                              cameraInputRef.current?.click();
-                            }}
+                            onClick={handleNativeCameraGroup}
                             className="flex items-center gap-3 p-2.5 rounded-2xl hover:bg-white/5 text-left transition-all group"
                           >
                             <div className="w-9 h-9 rounded-xl bg-pink-500/20 text-pink-400 border border-pink-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -1422,10 +1454,7 @@ export default function GroupChat({ currentUserId, userName, userAvatar, isDarkM
                           {/* 4. Galeria */}
                           <button
                             type="button"
-                            onClick={() => {
-                              setShowAttachmentMenu(false);
-                              fileInputRef.current?.click();
-                            }}
+                            onClick={handleNativeGalleryGroup}
                             className="flex items-center gap-3 p-2.5 rounded-2xl hover:bg-white/5 text-left transition-all group"
                           >
                             <div className="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">

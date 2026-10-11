@@ -3,6 +3,8 @@ import { motion } from 'motion/react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { playSuccessSound } from '../lib/sounds';
+import { triggerLightHaptic, triggerSuccessHaptic, triggerWarningHaptic } from '../lib/haptics';
+import { AbsenceJustificationModal } from './AbsenceJustificationModal';
 
 interface ClockMarkingProps {
   onMark: (hours: number) => void;
@@ -15,6 +17,7 @@ export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedT
   const [currentTime, setCurrentTime] = useState(new Date());
   const [selectedHours, setSelectedHours] = useState(8);
   const [isSunday, setIsSunday] = useState(new Date().getDay() === 0);
+  const [isAbsenceModalOpen, setIsAbsenceModalOpen] = useState(false);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -25,10 +28,12 @@ export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedT
   }, []);
 
   const handleAbsenceClick = () => {
-    const reason = prompt('Justificativa da falta:');
-    if (reason) {
-      onAbsence(reason);
-    }
+    setIsAbsenceModalOpen(true);
+  };
+
+  const handleConfirmAbsence = (reason: string) => {
+    setIsAbsenceModalOpen(false);
+    onAbsence(reason);
   };
 
   const progress = (selectedHours / 15) * 100;
@@ -108,7 +113,10 @@ export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedT
               {[7, 8, 9, 10, 12].map((h) => (
                 <button
                   key={h}
-                  onClick={() => setSelectedHours(h)}
+                  onClick={() => {
+                    triggerLightHaptic();
+                    setSelectedHours(h);
+                  }}
                   className={`flex-1 py-3 rounded-xl text-xs font-black transition-all border ${selectedHours === h ? 'bg-white text-black border-white' : 'bg-[#1c2431] text-white/40 border-white/5 hover:border-white/20'}`}
                 >
                   {h}h
@@ -133,6 +141,7 @@ export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedT
             ) : (
               <button
                 onClick={() => {
+                  triggerSuccessHaptic();
                   playSuccessSound();
                   onMark(selectedHours);
                 }}
@@ -152,8 +161,11 @@ export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedT
           
           {!hasMarkedToday && (
             <button 
-              onClick={handleAbsenceClick}
-              className="w-full bg-transparent border border-red-500/20 text-red-400/60 py-4 rounded-[1.5rem] font-black text-[10px] uppercase tracking-[0.2em] hover:bg-red-500/5 transition-all"
+              onClick={() => {
+                triggerWarningHaptic();
+                handleAbsenceClick();
+              }}
+              className="w-full bg-white/5 border border-white/10 text-white/70 py-4 rounded-[1.5rem] font-black text-[10px] uppercase tracking-[0.2em] hover:bg-white/10 hover:text-white transition-all active:scale-[0.97]"
             >
               Marcar Falta / Justificar
             </button>
@@ -164,6 +176,13 @@ export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedT
           {isSunday ? 'Bom descanso! Voltamos amanhã.' : hasMarkedToday ? 'O ponto para o dia de hoje já foi sincronizado.' : `Entrada Livre até 23:59 | Total Selecionado: ${selectedHours}h`}
         </p>
       </div>
+
+      {/* Modal de Justificativa de Falta Premium Dark/Dourado */}
+      <AbsenceJustificationModal
+        isOpen={isAbsenceModalOpen}
+        onClose={() => setIsAbsenceModalOpen(false)}
+        onConfirm={handleConfirmAbsence}
+      />
     </div>
   );
 }

@@ -6,6 +6,10 @@ import { Bell, Save, ChevronLeft, Clock, Calendar, LogOut, User, HardHat, Briefc
 import FCMPushModal from './FCMPushModal';
 import AppUpdateModal from './AppUpdateModal';
 import { checkForAppUpdate, getAppVersion, ReleaseInfo } from '../services/appUpdateService';
+import { getCurrentLocation } from '../lib/locationService';
+import { captureNativePhoto } from '../lib/cameraService';
+import { triggerLightHaptic, triggerSuccessHaptic, triggerWarningHaptic } from '../lib/haptics';
+import { Capacitor } from '@capacitor/core';
 
 interface SettingsViewProps {
   userId: string;
@@ -100,13 +104,16 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
     setLoading(false);
   };
 
-  const uploadAvatar = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const uploadAvatar = async (event?: React.ChangeEvent<HTMLInputElement>, nativeFile?: File) => {
     try {
       setUploading(true);
-      if (!event.target.files || event.target.files.length === 0) return;
+      let file: File | null = nativeFile || null;
+      if (!file && event?.target.files && event.target.files.length > 0) {
+        file = event.target.files[0];
+      }
+      if (!file) return;
 
-      const file = event.target.files[0];
-      const fileExt = file.name.split('.').pop();
+      const fileExt = file.name.split('.').pop() || 'jpg';
       const filePath = `${userId}/${Math.random()}.${fileExt}`;
 
       const { error: uploadError } = await supabase.storage
@@ -120,32 +127,44 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
         .getPublicUrl(filePath);
 
       setAvatarUrl(publicUrl);
+      await triggerSuccessHaptic();
     } catch (error: any) {
+      await triggerWarningHaptic();
       alert(error.message);
     } finally {
       setUploading(false);
     }
   };
 
-  const updateLocation = () => {
-    if (!navigator.geolocation) return;
-    setSaving(true);
-    navigator.geolocation.getCurrentPosition(async (position) => {
-      const { latitude, longitude } = position.coords;
-      try {
-        const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`);
-        const data = await response.json();
-        const city = data.address.city || data.address.town || data.address.village || data.address.suburb || data.address.county || 'Portugal';
-        setLocationCity(city);
-      } catch (err) {
-        alert('Erro ao identificar cidade.');
-      } finally {
-        setSaving(false);
+  const handleAvatarButtonClick = async () => {
+    triggerLightHaptic();
+    if (Capacitor.isNativePlatform()) {
+      const file = await captureNativePhoto('photos');
+      if (file) {
+        await uploadAvatar(undefined, file);
       }
-    }, () => {
-      alert('Ative o GPS.');
+    } else {
+      document.getElementById('avatar-upload-settings')?.click();
+    }
+  };
+
+  const updateLocation = async () => {
+    triggerLightHaptic();
+    setSaving(true);
+    try {
+      const coords = await getCurrentLocation({ timeout: 10000, enableHighAccuracy: true });
+      const { latitude, longitude } = coords;
+      const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`);
+      const data = await response.json();
+      const city = data.address.city || data.address.town || data.address.village || data.address.suburb || data.address.county || 'Portugal';
+      setLocationCity(city);
+      await triggerSuccessHaptic();
+    } catch (err: any) {
+      await triggerWarningHaptic();
+      alert('Não foi possível obter a sua localização. Verifique as permissões de GPS.');
+    } finally {
       setSaving(false);
-    });
+    }
   };
 
   const toggleDay = (dayId: number) => {
@@ -236,10 +255,15 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
                   </div>
                 )}
               </div>
-              <label htmlFor="avatar-upload-settings" className="absolute -bottom-1 -right-1 w-8 h-8 bg-[#d4af37] rounded-xl flex items-center justify-center cursor-pointer hover:scale-110 transition-all shadow-lg">
+              <button 
+                type="button"
+                onClick={handleAvatarButtonClick} 
+                className="absolute -bottom-1 -right-1 w-8 h-8 bg-[#d4af37] rounded-xl flex items-center justify-center cursor-pointer hover:scale-110 active:scale-95 transition-all shadow-lg text-black"
+                title="Mudar foto de perfil"
+              >
                 <Camera size={14} className="text-black" />
-                <input type="file" id="avatar-upload-settings" accept="image/*" onChange={uploadAvatar} className="hidden" />
-              </label>
+              </button>
+              <input type="file" id="avatar-upload-settings" accept="image/*" onChange={(e) => uploadAvatar(e)} className="hidden" />
             </div>
 
             <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -313,13 +337,13 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
               </div>
               <div>
                 <h3 className="text-sm font-black uppercase tracking-wider text-white flex items-center gap-2">
-                  Notificações Push Firebase (FCM)
+                  Notificações Nativas Android (FCM)
                   <span className="text-[7px] bg-[#d4af37] text-black px-1.5 py-0.5 rounded font-mono uppercase font-black">
                     App Fechado
                   </span>
                 </h3>
                 <p className="text-[10px] text-white/50 mt-0.5 leading-relaxed">
-                  Receba alertas na tela do celular mesmo se o app ou navegador estiver totalmente fechado.
+                  Receba alertas na tela do celular mesmo se o app estiver totalmente fechado em segundo plano.
                 </p>
               </div>
             </div>

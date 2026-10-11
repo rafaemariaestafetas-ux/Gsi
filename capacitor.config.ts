@@ -1,10 +1,11 @@
 import type { CapacitorConfig } from '@capacitor/cli';
+import { KeyboardResize, KeyboardStyle } from '@capacitor/keyboard';
 
 /**
  * Configuração do Capacitor - GSI PRO
- * Versão atual: 1.0.0 (Mantenha sincronizado com package.json e src/version.ts)
+ * Versão atual: 1.0.1 (Mantenha sincronizado com package.json e src/version.ts)
  */
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.0.1';
 
 const config: CapacitorConfig = {
   appId: 'com.gsipro.app',
@@ -22,6 +23,21 @@ const config: CapacitorConfig = {
     },
     PushNotifications: {
       presentationOptions: ['badge', 'sound', 'alert']
+    },
+    SplashScreen: {
+      launchShowDuration: 2000,
+      launchAutoHide: false,
+      backgroundColor: '#0a0e17',
+      androidSplashResourceName: 'splash',
+      androidScaleType: 'CENTER_CROP',
+      showSpinner: false,
+      splashFullScreen: true,
+      splashImmersive: true
+    },
+    Keyboard: {
+      resize: KeyboardResize.Body,
+      style: KeyboardStyle.Dark,
+      resizeOnFullScreen: true
     }
   },
   android: {

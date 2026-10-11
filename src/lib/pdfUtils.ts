@@ -1,5 +1,7 @@
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
+import { shareContent } from './shareService';
+import { triggerSuccessHaptic } from './haptics';
 
 export const exportToPDF = async (elementId: string, filename: string) => {
   const element = document.getElementById(elementId);
@@ -34,6 +36,14 @@ export const exportToPDF = async (elementId: string, filename: string) => {
     pdf.save(filename);
     
     element.style.display = originalStyle;
+    await triggerSuccessHaptic();
+
+    // Se estiver no mobile, tenta oferecer o share nativo
+    await shareContent({
+      title: 'Relatório de Ponto GSI PRO',
+      text: `Relatório de folha de ponto gerado: ${filename}`,
+      dialogTitle: 'Partilhar Relatório de Ponto'
+    });
   } catch (error) {
     console.error('Error generating PDF:', error);
   }
@@ -62,6 +72,14 @@ export const exportToJPG = async (elementId: string, filename: string) => {
     link.click();
     
     element.style.display = originalStyle;
+    await triggerSuccessHaptic();
+
+    // Oferece partilha nativa
+    await shareContent({
+      title: 'Folha de Ponto GSI PRO',
+      text: `Folha de ponto mensal gerada: ${filename}`,
+      dialogTitle: 'Partilhar Folha de Ponto'
+    });
   } catch (error) {
     console.error('Error generating JPG:', error);
   }

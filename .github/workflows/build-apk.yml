@@ -70,6 +70,32 @@ jobs:
         with:
           node-version: 22
 
+      - name: 🏷️ Detectar Versão da Aplicação (src/version.ts)
+        run: |
+          VERSION=$(node -e "
+            const fs = require('fs');
+            try {
+              const content = fs.readFileSync('src/version.ts', 'utf8');
+              const match = content.match(/export\s+const\s+APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]/);
+              console.log(match ? match[1].trim() : '1.0.0');
+            } catch (e) {
+              console.log('1.0.0');
+            }
+          ")
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG_TO_USE="${{ github.event.inputs.release_tag }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_TO_USE="${GITHUB_REF#refs/tags/}"
+          else
+            TAG_TO_USE="v$VERSION"
+          fi
+          
+          echo "RELEASE_TAG=$TAG_TO_USE" >> $GITHUB_ENV
+          echo "Versão detectada: $VERSION"
+          echo "Tag da Release: $TAG_TO_USE"
+
       - name: 📦 Instalar Dependências do Projeto
         run: npm install
 
@@ -96,7 +122,7 @@ jobs:
             echo "Compilando APK em modo RELEASE..."
             ./gradlew assembleRelease --no-daemon --stacktrace
           else
-            echo "Compilando APK em modo DEBUG..."
+            echo "Compilando APK em modo DEBUG (auto-assinado para instalação direta)..."
             ./gradlew assembleDebug --no-daemon --stacktrace
           fi
           cd ..
@@ -108,29 +134,31 @@ jobs:
           cd build-artifacts
           for f in *.apk; do
             if [ -f "$f" ]; then
-              cp "$f" "GSI_PRO_${f}"
+              cp "$f" "GSI_PRO_${RELEASE_TAG}.apk"
+              break
             fi
           done
           echo "=== Arquivos APK gerados ==="
           ls -lh
 
-      - name: 🚀 Disponibilizar APK para Download
+      - name: 🚀 Disponibilizar APK nos Artifacts do Workflow
         uses: actions/upload-artifact@v4
         with:
-          name: GSI-PRO-Android-APK
+          name: GSI-PRO-${{ env.RELEASE_TAG }}-APK
           path: build-artifacts/*.apk
           retention-days: 30
 
-      - name: 🏷️ Publicar como GitHub Release (se for Tag ou create_release marcado)
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true
+      - name: 🏷️ Publicar ou Atualizar GitHub Release com APK
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
-          name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "GSI PRO ${{ env.RELEASE_TAG }}"
           files: build-artifacts/*.apk
           draft: false
           prerelease: false
           generate_release_notes: true
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

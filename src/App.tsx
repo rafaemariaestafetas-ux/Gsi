@@ -16,7 +16,13 @@ import Messenger from './components/Messenger';
 import FCMPushModal from './components/FCMPushModal';
 import AppUpdateModal from './components/AppUpdateModal';
 import { checkForAppUpdate, ReleaseInfo } from './services/appUpdateService';
-import { registerFCMServiceWorker, setupForegroundMessageListener, requestFCMToken, initializePushNotifications, configureAndroidNotificationChannel } from './services/firebaseMessaging';
+import { 
+  setupForegroundMessageListener, 
+  requestNativeNotificationPermission, 
+  initializePushNotifications, 
+  configureAndroidNotificationChannel,
+  checkNativeNotificationPermission
+} from './services/firebaseMessaging';
 import { playNotificationSound, startIncomingCallRingtone, stopIncomingCallRingtone } from './lib/sounds';
 import { getGamificationStats } from './lib/gamification';
 import { 
@@ -53,8 +59,13 @@ import { Capacitor } from '@capacitor/core';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { App as CapApp } from '@capacitor/app';
 import { PushNotifications } from '@capacitor/push-notifications';
+import { SplashScreen } from '@capacitor/splash-screen';
+import { triggerLightHaptic, triggerMediumHaptic, triggerSuccessHaptic, triggerWarningHaptic } from './lib/haptics';
+import { getCurrentLocation } from './lib/locationService';
+import { useToast } from './lib/ToastContext';
 
 export default function App() {
+  const { showSuccess, showError, showWarning, showInfo } = useToast();
   const [session, setSession] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'home' | 'ponto' | 'society' | 'alerts' | 'profile'>('home');
   const [entries, setEntries] = useState<TimeEntry[]>([]);
@@ -73,7 +84,7 @@ export default function App() {
   const [showToast, setShowToast] = useState(false);
   const [quickHours, setQuickHours] = useState(8);
   const [isDarkMode, setIsDarkMode] = useState(true); // Forced dark mode for premium look
-  const [notificationsEnabled, setNotificationsEnabled] = useState('Notification' in window && Notification.permission === 'granted');
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState<Map<string, any>>(new Map());
   const [isMessengerOpen, setIsMessengerOpen] = useState(false);
   const [isImmersive, setIsImmersive] = useState(false);
@@ -87,26 +98,32 @@ export default function App() {
   const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
 
-  // Check for app updates on launch from GitHub Releases
+  // Check for app updates on launch from GitHub Releases (apenas Android nativo)
   useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
     let isMounted = true;
     const runUpdateCheck = async () => {
       try {
         const release = await checkForAppUpdate();
         if (isMounted && release && release.hasUpdate) {
-          // Check if user dismissed this exact version previously in this session
-          const dismissedTag = sessionStorage.getItem('gsi_dismissed_update_tag');
-          if (dismissedTag !== release.tag_name) {
-            setUpdateRelease(release);
-            setIsUpdateModalOpen(true);
+          // Verifica se o utilizador já descartou esta versão (se não for obrigatória)
+          const targetVer = release.latestVersion || release.tag_name;
+          const dismissedVer = localStorage.getItem('gsi_dismissed_update_version');
+          if (!release.isMandatory && dismissedVer === targetVer) {
+            return;
           }
+
+          setUpdateRelease(release);
+          setIsUpdateModalOpen(true);
         }
       } catch (err) {
+        // Silencioso - não bloqueia o resto da aplicação
         console.warn('[App] Update check failed:', err);
       }
     };
 
-    // Small delay (1.5s) to let the app finish booting and avoid stuttering
+    // Pequeno atraso (1.5s) para o app carregar suavemente
     const timer = setTimeout(runUpdateCheck, 1500);
     return () => {
       isMounted = false;
@@ -114,20 +131,37 @@ export default function App() {
     };
   }, []);
 
-  // Initialize native features on startup (excluding push prompt to prevent launch crashes)
+  // Request native Android notification permission as soon as the app opens (like GPS location)
   useEffect(() => {
-    if (Capacitor.isNativePlatform()) {
-        configureAndroidNotificationChannel().catch(() => {});
-    }
-  }, []);
+    if (!Capacitor.isNativePlatform()) return;
 
-  // Auto-register device for Web Push / FCM notifications upon login
-  useEffect(() => {
-    if (session?.user?.id) {
-      requestFCMToken(session.user.id).then(token => {
-        if (token) setFcmRegistered(true);
-      });
-    }
+    let isMounted = true;
+    const initNativeNotifications = async () => {
+      try {
+        await configureAndroidNotificationChannel();
+        const granted = await checkNativeNotificationPermission();
+        if (isMounted && granted) {
+          setNotificationsEnabled(true);
+          setFcmRegistered(true);
+        }
+
+        // Trigger native notification permission prompt on launch
+        const token = await requestNativeNotificationPermission(session?.user?.id);
+        if (isMounted && token) {
+          setNotificationsEnabled(true);
+          setFcmRegistered(true);
+        }
+      } catch (err) {
+        console.warn('[App] Native notification startup note:', err);
+      }
+    };
+
+    // Small 800ms timer to ensure activity has finished initial render
+    const timer = setTimeout(initNativeNotifications, 800);
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
   }, [session?.user?.id]);
 
   // Native Android Capacitor Lifecycle (Back button & Status Bar)
@@ -241,16 +275,6 @@ export default function App() {
           setIncomingCallBanner(payload);
           startIncomingCallRingtone();
           if (navigator.vibrate) navigator.vibrate([500, 250, 500, 250, 500]);
-
-          // Trigger native notification if browser is in background
-          if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-            new Notification(`📞 Chamada de ${payload.senderName || 'Colega de Obra'}`, {
-              body: `Chamada de ${payload.callType === 'video' ? 'vídeo' : 'voz'} no GSI Pro...`,
-              icon: payload.senderAvatar || '/icons/icon-192.png',
-              tag: 'incoming-call',
-              requireInteraction: true
-            });
-          }
         } else if (payload?.type === 'call-declined' || payload?.type === 'hangup' || payload?.type === 'call-ended') {
           stopIncomingCallRingtone();
           setIncomingCallBanner(null);
@@ -283,14 +307,6 @@ export default function App() {
             senderAvatar: sAvatar,
             content: msg.type === 'audio' ? '🎵 Mensagem de áudio' : (msg.type === 'image' ? '📷 Foto' : (msg.content || 'Nova mensagem'))
           });
-
-          if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-            new Notification(`💬 ${sName}`, {
-              body: msg.content || 'Nova mensagem recebida',
-              icon: sAvatar || '/icons/icon-192.png',
-              tag: `msg-${msg.sender_id}`
-            });
-          }
         }
       })
       .subscribe();
@@ -301,13 +317,10 @@ export default function App() {
     };
   }, [session, isMessengerOpen, onlineUsers]);
 
-  // Handle URL launch parameters and Service Worker messages
+  // Handle URL launch parameters and foreground push toast
   useEffect(() => {
-    registerFCMServiceWorker();
-
-    setupForegroundMessageListener((payload) => {
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 5000);
+    setupForegroundMessageListener((payload: any) => {
+      showInfo(payload?.notification?.body || 'Novo alerta de ponto recebido!', 'ALERTA GSI');
     });
 
     if (typeof window !== 'undefined') {
@@ -329,26 +342,6 @@ export default function App() {
         setIsMessengerOpen(true);
         window.history.replaceState({}, '', '/');
       }
-
-      // Listen for messages from the service worker
-      if ('serviceWorker' in navigator) {
-        const handler = (event: MessageEvent) => {
-          if (event.data?.type === 'NAVIGATE_TO_PONTO') {
-            setActiveTab('ponto');
-          } else if (event.data?.type === 'INCOMING_CALL_NOTIFICATION') {
-            const payload = event.data.payload;
-            setIncomingCallSignal(payload);
-            setIncomingCallBanner(payload);
-            startIncomingCallRingtone();
-          } else if (event.data?.type === 'OPEN_MESSENGER_CHAT') {
-            setIsMessengerOpen(true);
-          }
-        };
-        navigator.serviceWorker.addEventListener('message', handler);
-        return () => {
-          navigator.serviceWorker.removeEventListener('message', handler);
-        };
-      }
     }
   }, []);
 
@@ -364,59 +357,29 @@ export default function App() {
     });
 
     const updateUserLocation = async () => {
-      if (!navigator.geolocation) return;
-
-      // First check if we already have permission or need to ask
       try {
-        const permissionStatus = await navigator.permissions.query({ name: 'geolocation' });
-        if (permissionStatus.state === 'denied') {
-          console.warn('Localização bloqueada pelo usuário.');
-          return;
+        const coords = await getCurrentLocation({ enableHighAccuracy: false, timeout: 6000 });
+        const { latitude, longitude } = coords;
+        const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`);
+        const data = await response.json();
+        const city = data.address?.city || data.address?.town || data.address?.village || data.address?.suburb || data.address?.county || 'Portugal';
+        
+        // Update profile
+        await supabase.from('profiles').update({ location_city: city }).eq('id', session.user.id);
+        
+        // Update presence on the active channel
+        if (channel && (channel.state === 'joined' || channel.state === 'joining')) {
+          await channel.track({
+            online_at: new Date().toISOString(),
+            city: city
+          });
         }
-      } catch (e) {
-        // Permissions API not supported in some mobile browsers, continue anyway
+        
+        // Sync local state
+        setProfile(prev => prev ? { ...prev, location_city: city } : null);
+      } catch (err) {
+        console.warn('[App] Localização online não disponível:', err);
       }
-
-      navigator.geolocation.getCurrentPosition(
-        async (position) => {
-          const { latitude, longitude } = position.coords;
-          try {
-            const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`);
-            const data = await response.json();
-            const city = data.address.city || data.address.town || data.address.village || data.address.suburb || data.address.county || 'Portugal';
-            
-            // Update profile
-            await supabase.from('profiles').update({ location_city: city }).eq('id', session.user.id);
-            
-            // Update presence on the active channel
-            if (channel && (channel.state === 'joined' || channel.state === 'joining')) {
-              await channel.track({
-                online_at: new Date().toISOString(),
-                city: city
-              });
-            }
-            
-            // Sync local state
-            setProfile(prev => prev ? { ...prev, location_city: city } : null);
-          } catch (err) {
-            console.error('Erro ao converter coordenadas:', err);
-          }
-        },
-        (error) => {
-          // Log specific error codes for debugging
-          const errorMap: Record<number, string> = {
-            1: 'Permissão negada pelo usuário.',
-            2: 'Posição indisponível.',
-            3: 'Tempo de busca esgotado.'
-          };
-          console.warn(`GPS Warning (${error.code}): ${errorMap[error.code] || 'Erro desconhecido'}`);
-        },
-        { 
-          enableHighAccuracy: false, // Set to false for faster response on mobile
-          timeout: 5000, 
-          maximumAge: 60000 
-        }
-      );
     };
 
     channel
@@ -443,52 +406,16 @@ export default function App() {
   }, [session]);
 
   const requestNotificationPermission = async () => {
-    if (!('Notification' in window)) {
-      alert('Seu navegador não suporta notificações.');
-      return;
-    }
-
-    const permission = await Notification.requestPermission();
-    if (permission === 'granted') {
+    if (!Capacitor.isNativePlatform()) return;
+    const token = await requestNativeNotificationPermission(session?.user?.id);
+    if (token) {
       setNotificationsEnabled(true);
-      new Notification('GSI PRO', {
-        body: 'Notificações ativadas! Lembraremos você de registrar seu ponto.',
-        icon: 'https://cdn-icons-png.flaticon.com/512/5977/5977591.png'
-      });
+      setFcmRegistered(true);
     }
   };
 
-  const checkMissingEntries = (currentEntries: TimeEntry[]) => {
-    if (!('Notification' in window) || Notification.permission !== 'granted' || !profile) return;
-
-    const now = new Date();
-    const currentDay = now.getDate();
-    const currentHour = now.getHours();
-    const currentDayOfWeek = now.getDay();
-
-    // Sundays don't need point marking
-    if (currentDayOfWeek === 0) return;
-
-    // Users can mark point any time until midnight.
-    // Notify at 10h, 14h and 19h if not marked yet
-    const notificationHours = [10, 14, 19];
-
-    if (notificationHours.includes(currentHour)) {
-      const hasTodayEntry = currentEntries.some(e => 
-        e.day === currentDay && 
-        e.month === now.getMonth() && 
-        e.year === now.getFullYear()
-      );
-
-      if (!hasTodayEntry) {
-        new Notification('Lembrete de Ponto!', {
-          body: `Você ainda não marcou seu ponto hoje. Não se esqueça de registrar sua jornada!`,
-          icon: 'https://cdn-icons-png.flaticon.com/512/5977/5977591.png',
-          tag: `ponto-pendente-${currentHour}`,
-          requireInteraction: true
-        });
-      }
-    }
+  const checkMissingEntries = (_currentEntries: TimeEntry[]) => {
+    // Web notifications removed. Android native FCM notifications are handled via push channel.
   };
 
   useEffect(() => {
@@ -529,15 +456,20 @@ export default function App() {
         .eq('user_id', session.user.id);
 
       await supabase.from('time_entries').insert([newEntry]);
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 3000);
+      showSuccess(`Falta do dia ${today.getDate()} justificada com sucesso!`, 'AUSÊNCIA REGISTADA');
       fetchEntries();
     } catch (err) {
-      console.warn('Erro ao marcar falta');
+      showError('Erro ao registar a falta. Tente novamente.');
     }
   };
 
   useEffect(() => {
+    const hideSplash = () => {
+      if (Capacitor.isNativePlatform()) {
+        SplashScreen.hide({ fadeOutDuration: 400 }).catch(() => {});
+      }
+    };
+
     let isMounted = true;
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (!isMounted) return;
@@ -546,12 +478,17 @@ export default function App() {
         fetchProfile(session.user.id);
       }
       setIsInitializing(false);
+      hideSplash();
     }).catch(() => {
       if (isMounted) setIsInitializing(false);
+      hideSplash();
     });
 
     const safetyTimer = setTimeout(() => {
-      if (isMounted) setIsInitializing(false);
+      if (isMounted) {
+        setIsInitializing(false);
+        hideSplash();
+      }
     }, 2500);
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -721,18 +658,16 @@ export default function App() {
       
       setHours('');
       setObra('');
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 3000);
+      showSuccess(`Ponto registado para o dia ${day}: ${hours}h na obra ${obra || 'padrão'}!`, 'PONTO REGISTADO');
       fetchEntries();
     } catch (err) {
-      console.warn('Erro de sincronia');
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 3000);
+      showError('Erro ao sincronizar ponto com o servidor.');
     }
   };
 
   const handleQuickMark = async (quickHours: number) => {
     if (!session) return;
+    await triggerSuccessHaptic();
     const today = new Date();
     const currentWorkSite = profile?.current_obra || obra || 'OBRA NÃO DEFINIDA';
     
@@ -763,11 +698,10 @@ export default function App() {
         .eq('user_id', session.user.id);
 
       await supabase.from('time_entries').insert([newEntry]);
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 3000);
+      showSuccess(`Ponto de hoje (${quickHours}h) registado com sucesso!`, 'PONTO REGISTADO');
       fetchEntries();
     } catch (err) {
-      console.warn('Erro de sincronia');
+      showError('Erro de sincronia com a base de dados.');
     }
   };
 
@@ -1072,21 +1006,30 @@ export default function App() {
           }}
         >
           <button 
-            onClick={() => setActiveTab('home')}
+            onClick={() => {
+              triggerLightHaptic();
+              setActiveTab('home');
+            }}
             className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'home' ? 'text-[#d4af37] scale-110' : 'text-white/30'}`}
           >
             <Home size={22} className={activeTab === 'home' ? 'fill-[#d4af37]/20' : ''} />
             <span className="text-[7px] font-black uppercase tracking-widest">Home</span>
           </button>
           <button 
-            onClick={() => setActiveTab('reels')}
+            onClick={() => {
+              triggerLightHaptic();
+              setActiveTab('reels');
+            }}
             className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'reels' ? 'text-[#d4af37] scale-110' : 'text-white/30'}`}
           >
             <Film size={22} className={activeTab === 'reels' ? 'fill-[#d4af37]/20' : ''} />
             <span className="text-[7px] font-black uppercase tracking-widest">Reels</span>
           </button>
           <button 
-            onClick={() => setActiveTab('ponto')}
+            onClick={() => {
+              triggerLightHaptic();
+              setActiveTab('ponto');
+            }}
             className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'ponto' ? 'text-[#d4af37] scale-110' : 'text-white/30'}`}
           >
             <div className={`p-3 rounded-full border-2 ${activeTab === 'ponto' ? 'border-[#d4af37] bg-[#d4af37]/10' : 'border-white/10 bg-white/5'} -mt-8 transition-all shadow-[0_0_20px_rgba(212,175,55,0.2)]`}>
@@ -1095,14 +1038,20 @@ export default function App() {
             <span className="text-[7px] font-black uppercase tracking-widest mt-1">Ponto</span>
           </button>
           <button 
-            onClick={() => setActiveTab('society')}
+            onClick={() => {
+              triggerLightHaptic();
+              setActiveTab('society');
+            }}
             className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'society' ? 'text-[#d4af37] scale-110' : 'text-white/30'}`}
           >
             <Users size={22} />
             <span className="text-[7px] font-black uppercase tracking-widest">Equipa</span>
           </button>
           <button 
-            onClick={() => setActiveTab('profile')}
+            onClick={() => {
+              triggerLightHaptic();
+              setActiveTab('profile');
+            }}
             className={`flex flex-col items-center gap-1 transition-all ${activeTab === 'profile' ? 'text-[#d4af37] scale-110' : 'text-white/30'}`}
           >
             <User size={22} />
@@ -1183,6 +1132,7 @@ export default function App() {
                 {/* Recusar (Decline) */}
                 <button
                   onClick={() => {
+                    triggerWarningHaptic();
                     stopIncomingCallRingtone();
                     if (incomingCallBanner?.senderId) {
                       const ch = supabase.channel(`call-signals-${incomingCallBanner.senderId}`);
@@ -1205,6 +1155,7 @@ export default function App() {
                 {/* Atender (Answer) */}
                 <button
                   onClick={() => {
+                    triggerSuccessHaptic();
                     stopIncomingCallRingtone();
                     setIncomingCallSignal({ ...incomingCallBanner, autoAccept: true });
                     setIncomingCallBanner(null);
@@ -1285,23 +1236,14 @@ export default function App() {
           onClose={() => {
             setIsUpdateModalOpen(false);
             if (updateRelease) {
-              sessionStorage.setItem('gsi_dismissed_update_tag', updateRelease.tag_name);
+              const targetVer = updateRelease.latestVersion || updateRelease.tag_name;
+              localStorage.setItem('gsi_dismissed_update_version', targetVer);
             }
           }}
         />
       )}
 
       <AnimatePresence>
-        {showToast && (
-          <motion.div 
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-            className="fixed bottom-24 md:bottom-12 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-8 py-4 rounded-2xl font-black text-[10px] uppercase tracking-[0.3em] shadow-xl shadow-blue-600/20 z-[100]"
-          >
-            REGISTO CONFIRMADO
-          </motion.div>
-        )}
       </AnimatePresence>
     </div>
   );

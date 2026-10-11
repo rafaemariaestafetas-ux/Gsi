@@ -8,6 +8,8 @@ import ReportTemplate from './ReportTemplate';
 import { format, addMonths, subMonths, startOfMonth, endOfMonth, eachDayOfInterval, isSameDay, getDay } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { toJpeg } from 'html-to-image';
+import { shareContent } from '../lib/shareService';
+import { triggerSuccessHaptic, triggerLightHaptic } from '../lib/haptics';
 
 export default function ProfileView({ 
   userId, 
@@ -134,6 +136,7 @@ export default function ProfileView({
     if (!reportRef.current) return;
     
     try {
+      triggerLightHaptic();
       setExporting(true);
       const dataUrl = await toJpeg(reportRef.current, { 
         quality: 0.95,
@@ -142,10 +145,20 @@ export default function ProfileView({
         height: 1123 // approx 297mm at 96dpi
       });
       
+      const fileName = `Folha_Ponto_${format(viewDate, 'MM_yyyy')}.jpg`;
       const link = document.createElement('a');
-      link.download = `Folha_Ponto_${format(viewDate, 'MM_yyyy')}.jpg`;
+      link.download = fileName;
       link.href = dataUrl;
       link.click();
+
+      await triggerSuccessHaptic();
+
+      // Partilha nativa no Android
+      await shareContent({
+        title: 'Folha de Ponto Mensal GSI PRO',
+        text: `Folha de ponto de ${format(viewDate, 'MMMM yyyy', { locale: ptBR })} gerada com sucesso.`,
+        dialogTitle: 'Partilhar Folha de Ponto'
+      });
     } catch (err) {
       console.error('Erro ao gerar JPG:', err);
       alert('Erro ao gerar o relatório. Tente novamente.');

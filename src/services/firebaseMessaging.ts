@@ -1,28 +1,24 @@
 import { Capacitor } from '@capacitor/core';
-import { PushNotifications, Token, ActionPerformed, PushNotificationSchema } from '@capacitor/push-notifications';
-import { getMessaging, getToken, onMessage, isSupported } from 'firebase/messaging';
-import { app, db } from './firebaseClient';
-import { doc, setDoc, collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { PushNotifications, Token, PushNotificationSchema, ActionPerformed } from '@capacitor/push-notifications';
 import { supabase } from './supabaseClient';
 
 export interface FCMStatus {
   isSupported: boolean;
-  permission: NotificationPermission | string;
+  permission: string;
   token: string | null;
-  platform: 'android' | 'web-push' | 'pwa';
+  platform: 'android';
   error?: string;
 }
 
-let currentToken: string | null = localStorage.getItem('gsi_fcm_token');
-let swRegistration: ServiceWorkerRegistration | null = null;
-let nativeListenersInitialized = false;
-
 export const HIGH_PRIORITY_CHANNEL_ID = 'gsi_high_priority_channel';
-export const VAPID_PUBLIC_KEY = 'BBpVZZ3789eDL53X-9jV_R7MdMlUtig8IJVWd9wVsvn-QgVbNqHLvz350x_J937EQj8XzK2lPBgqzb3gYDN84QQ';
+
+let currentUserId: string | null = null;
+let nativeListenersInitialized = false;
+let pendingTokenResolvers: Array<(token: string | null) => void> = [];
 
 /**
- * 1. Configure Android 8.0+ High Priority Notification Channel
- * Guarantees heads-up banner, high urgency sound, and vibration for incoming calls and messages.
+ * Configure Android 8.0+ High Priority Notification Channel
+ * Heads-up banner, high urgency sound, and vibration for calls and messages.
  */
 export async function configureAndroidNotificationChannel(): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
@@ -31,7 +27,7 @@ export async function configureAndroidNotificationChannel(): Promise<void> {
     await PushNotifications.createChannel({
       id: HIGH_PRIORITY_CHANNEL_ID,
       name: 'Chamadas e Mensagens GSI PRO',
-      description: 'Notificações urgentes de chamadas e mensagens em tempo real com o app fechado',
+      description: 'Notificações urgentes de chamadas e mensagens em tempo real',
       importance: 5, // High importance (heads-up notification & sound)
       visibility: 1, // Public on lockscreen
       sound: 'default',
@@ -39,223 +35,183 @@ export async function configureAndroidNotificationChannel(): Promise<void> {
       lights: true,
       lightColor: '#eab308'
     });
-    console.log('[Native FCM] Canal de alta prioridade configurado com sucesso:', HIGH_PRIORITY_CHANNEL_ID);
+    console.log('[Native Push] Canal Android configurado:', HIGH_PRIORITY_CHANNEL_ID);
   } catch (err) {
-    console.warn('[Native FCM] Falha ao configurar canal de notificação:', err);
+    console.warn('[Native Push] Falha ao configurar canal:', err);
   }
 }
 
 /**
- * Helper to convert VAPID base64 key
+ * Initializes native event listeners once.
+ * Prevents memory leaks and duplicate listener crashes on Android.
  */
-function urlB64ToUint8Array(base64String: string) {
-  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
-  const rawData = window.atob(base64);
-  const outputArray = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; ++i) {
-    outputArray[i] = rawData.charCodeAt(i);
-  }
-  return outputArray;
-}
-
-/**
- * Register Service Worker for Web Push / PWA background notifications
- */
-export async function registerFCMServiceWorker(): Promise<ServiceWorkerRegistration | null> {
-  if (typeof window === 'undefined' || !('serviceWorker' in navigator) || Capacitor.isNativePlatform()) {
-    return null;
-  }
+function ensureNativeListeners() {
+  if (!Capacitor.isNativePlatform() || nativeListenersInitialized) return;
+  nativeListenersInitialized = true;
 
   try {
-    const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
-      scope: '/'
-    });
-    swRegistration = registration;
-    console.log('[FCM] Service Worker registered with scope:', registration.scope);
-    return registration;
-  } catch (err) {
-    console.warn('[FCM] Service worker registration error:', err);
-    return null;
-  }
-}
+    // 1. Token registration success listener
+    PushNotifications.addListener('registration', async (token: Token) => {
+      try {
+        console.log('[Native Push] Token FCM registrado com sucesso!');
+        const fcmToken = token.value;
+        localStorage.setItem('gsi_fcm_token', fcmToken);
+        localStorage.setItem('gsi_platform', 'android');
 
-/**
- * 2. Request Notification Permission and obtain Token
- * Uses Native FCM (@capacitor/push-notifications) on Android and Web Push on Browsers/PWAs.
- */
-export async function initializePushNotifications(): Promise<void> {
-  if (Capacitor.isNativePlatform()) {
-    try {
-      console.log('[Native FCM] Configurando canal e solicitando permissão nativa...');
-      await configureAndroidNotificationChannel();
-
-      let permStatus = await PushNotifications.checkPermissions();
-      console.log('[Native FCM] Status atual de permissão:', permStatus.receive);
-
-      if (permStatus.receive !== 'granted') {
-        permStatus = await PushNotifications.requestPermissions();
-        console.log('[Native FCM] Novo status após solicitação:', permStatus.receive);
-      }
-
-      if (permStatus.receive === 'granted') {
-        await PushNotifications.register();
-      }
-    } catch (err) {
-      console.warn('[Native FCM] Falha ao configurar push nativo:', err);
-    }
-  }
-}
-
-export async function requestFCMToken(userId?: string): Promise<string | null> {
-  // A. NATIVE ANDROID FLOW (Capacitor)
-  if (Capacitor.isNativePlatform()) {
-    try {
-      // Check permissions first without forcing prompt on login
-      const permStatus = await PushNotifications.checkPermissions();
-      if (permStatus.receive !== 'granted') {
-        console.log('[Native FCM] Permissão não concedida ainda, ignorando registro automático no login.');
-        return localStorage.getItem('gsi_fcm_token');
-      }
-
-      await PushNotifications.register().catch(() => {});
-
-      return new Promise<string | null>((resolve) => {
-        let hasResolved = false;
-
-        const timeoutId = setTimeout(() => {
-          if (!hasResolved) {
-            hasResolved = true;
-            const fallbackToken = localStorage.getItem('gsi_fcm_token');
-            resolve(fallbackToken);
-          }
-        }, 8000);
-
-        PushNotifications.addListener('registration', async (token: Token) => {
-          if (hasResolved) return;
-          hasResolved = true;
-          clearTimeout(timeoutId);
-
-          const fcmToken = token.value;
-          currentToken = fcmToken;
-          localStorage.setItem('gsi_fcm_token', fcmToken);
-          localStorage.setItem('gsi_platform', 'android');
-
-          if (userId) {
-            await saveTokenToDatabase(userId, fcmToken, 'android');
-          }
-
-          resolve(fcmToken);
-        });
-
-        PushNotifications.addListener('registrationError', (error) => {
-          console.error('[Native FCM] Erro no registro de notificações:', error);
-          if (!hasResolved) {
-            hasResolved = true;
-            clearTimeout(timeoutId);
-            resolve(null);
-          }
-        });
-      });
-    } catch (androidErr) {
-      console.error('[Native FCM] Erro ao obter token FCM nativo:', androidErr);
-      return null;
-    }
-  }
-
-  // B. WEB / PWA FLOW
-  if (typeof window === 'undefined' || !('Notification' in window)) {
-    return null;
-  }
-
-  try {
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') {
-      console.log('[WebPush] Permissão de notificação não concedida:', permission);
-      return null;
-    }
-
-    const registration = swRegistration || (await registerFCMServiceWorker());
-    if (!registration) {
-      console.warn('[WebPush] Não foi possível obter token sem Service Worker.');
-      return null;
-    }
-
-    // Subscribe to standard Web Push
-    try {
-      const applicationServerKey = urlB64ToUint8Array(VAPID_PUBLIC_KEY);
-      let sub = await registration.pushManager.getSubscription();
-      if (!sub) {
-        sub = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey
-        });
-      }
-
-      if (sub) {
-        const subJson = sub.toJSON();
-        const subString = JSON.stringify(subJson);
-        currentToken = subString;
-        localStorage.setItem('gsi_fcm_token', subString);
-        localStorage.setItem('gsi_platform', 'web-push');
-        console.log('[WebPush] Subscrição Web Push obtida com sucesso!');
-
-        if (userId) {
-          await saveTokenToDatabase(userId, subString, 'web-push');
+        if (currentUserId) {
+          await saveTokenToDatabase(currentUserId, fcmToken, 'android');
         }
 
-        return subString;
+        // Resolve all waiting callers
+        const resolvers = [...pendingTokenResolvers];
+        pendingTokenResolvers = [];
+        resolvers.forEach(resolve => {
+          try { resolve(fcmToken); } catch {}
+        });
+      } catch (err) {
+        console.error('[Native Push] Erro ao processar token recebido:', err);
       }
-    } catch (wpErr) {
-      console.warn('[WebPush] Web Push subscription note:', wpErr);
-    }
+    });
 
-    // Fallback to Firebase Messaging getToken if available
-    const supported = await isSupported();
-    if (supported) {
-      const messaging = getMessaging(app);
-      const token = await getToken(messaging, {
-        serviceWorkerRegistration: registration,
-        vapidKey: VAPID_PUBLIC_KEY
+    // 2. Token registration error listener
+    PushNotifications.addListener('registrationError', (error: any) => {
+      console.error('[Native Push] Erro no registro de notificações:', error);
+      const resolvers = [...pendingTokenResolvers];
+      pendingTokenResolvers = [];
+      const cached = localStorage.getItem('gsi_fcm_token');
+      resolvers.forEach(resolve => {
+        try { resolve(cached); } catch {}
       });
-
-      if (token) {
-        currentToken = token;
-        localStorage.setItem('gsi_fcm_token', token);
-        localStorage.setItem('gsi_platform', 'web-push');
-        if (userId) await saveTokenToDatabase(userId, token, 'web-push');
-        return token;
-      }
-    }
-  } catch (err: any) {
-    console.warn('[WebPush] Erro ao obter token Web Push:', err);
+    });
+  } catch (err) {
+    console.warn('[Native Push] Erro ao inicializar listeners nativos:', err);
   }
-
-  return null;
 }
 
 /**
- * 3. Save token to Supabase user_push_tokens and Server / Firestore
- * Saves with platform: 'android' for Capacitor or 'web-push' for browser.
+ * Check if native notification permission is currently granted
  */
-export async function saveTokenToDatabase(userId: string, token: string, platform?: string): Promise<void> {
-  const actualPlatform = platform || (Capacitor.isNativePlatform() ? 'android' : 'web-push');
+export async function checkNativeNotificationPermission(): Promise<boolean> {
+  if (!Capacitor.isNativePlatform()) return false;
+  try {
+    const status = await PushNotifications.checkPermissions();
+    return status.receive === 'granted';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Requests native Android notification permissions and registers the device.
+ * Stores the FCM token in Supabase (user_push_tokens table) with platform: 'android'.
+ * Never throws unhandled errors to guarantee zero crashes on launch or activation.
+ */
+export async function requestNativeNotificationPermission(userId?: string): Promise<string | null> {
+  if (userId) {
+    currentUserId = userId;
+  }
+
+  if (!Capacitor.isNativePlatform()) {
+    console.log('[Native Push] Dispositivo não é Android nativo (Capacitor).');
+    return null;
+  }
 
   try {
-    // 1. Save to Supabase user_push_tokens table (with platform: 'android' or 'web-push')
-    try {
-      await supabase.from('user_push_tokens').upsert({
-        user_id: userId,
-        token: token,
-        platform: actualPlatform,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'user_id,token' });
-      console.log(`[Push] Token salvo no Supabase (user_id: ${userId}, platform: ${actualPlatform}).`);
-    } catch (sbErr) {
-      console.warn('[Push] Supabase user_push_tokens note:', sbErr);
+    ensureNativeListeners();
+    await configureAndroidNotificationChannel();
+
+    // 1. Check existing permission
+    let status = await PushNotifications.checkPermissions();
+    console.log('[Native Push] Status de permissão atual:', status.receive);
+
+    // 2. If not granted, request native permission
+    if (status.receive !== 'granted') {
+      status = await PushNotifications.requestPermissions();
+      console.log('[Native Push] Status após solicitação ao usuário:', status.receive);
     }
 
-    // 2. Save via server endpoint
+    if (status.receive !== 'granted') {
+      console.log('[Native Push] Permissão não concedida pelo usuário.');
+      return null;
+    }
+
+    // 3. Register with Google FCM via Capacitor
+    const registrationPromise = new Promise<string | null>((resolve) => {
+      let resolved = false;
+
+      // Safety timeout so caller never hangs
+      const timeoutId = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          const cached = localStorage.getItem('gsi_fcm_token');
+          resolve(cached);
+        }
+      }, 7000);
+
+      pendingTokenResolvers.push((token) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeoutId);
+          resolve(token);
+        }
+      });
+    });
+
+    // Call native register
+    await PushNotifications.register().catch(regErr => {
+      console.warn('[Native Push] Erro ao chamar PushNotifications.register():', regErr);
+    });
+
+    const token = await registrationPromise;
+    if (token && userId) {
+      await saveTokenToDatabase(userId, token, 'android');
+    }
+    return token;
+  } catch (err) {
+    console.error('[Native Push] Erro durante ativação de notificações nativas:', err);
+    return localStorage.getItem('gsi_fcm_token');
+  }
+}
+
+/**
+ * Alias for requestNativeNotificationPermission to preserve compatibility
+ */
+export const requestFCMToken = requestNativeNotificationPermission;
+
+/**
+ * Initializes push notifications on app launch if on native platform.
+ */
+export async function initializePushNotifications(): Promise<void> {
+  if (!Capacitor.isNativePlatform()) return;
+  try {
+    await requestNativeNotificationPermission();
+  } catch (err) {
+    console.warn('[Native Push] Erro na inicialização:', err);
+  }
+}
+
+/**
+ * Save native FCM token to Supabase user_push_tokens with platform: 'android'
+ */
+export async function saveTokenToDatabase(userId: string, token: string, platform: string = 'android'): Promise<void> {
+  if (!userId || !token) return;
+
+  try {
+    // 1. Save to Supabase user_push_tokens table with platform: 'android'
+    const { error: sbErr } = await supabase.from('user_push_tokens').upsert({
+      user_id: userId,
+      token: token,
+      platform: 'android',
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'user_id,token' });
+
+    if (sbErr) {
+      console.warn('[Native Push] Nota ao salvar token no Supabase:', sbErr.message);
+    } else {
+      console.log(`[Native Push] Token FCM salvo no Supabase com platform: 'android' (user_id: ${userId})`);
+    }
+
+    // 2. Also inform server proxy if online
     try {
       await fetch('/api/save-token', {
         method: 'POST',
@@ -263,41 +219,25 @@ export async function saveTokenToDatabase(userId: string, token: string, platfor
         body: JSON.stringify({
           userId,
           token,
-          platform: actualPlatform
+          platform: 'android'
         })
       });
-    } catch (apiErr) {
-      console.warn('[Push] Server token registration note:', apiErr);
-    }
-
-    // 3. Save to Firestore fcm_tokens collection
-    try {
-      const tokenDocRef = doc(db, 'fcm_tokens', `${userId}_${actualPlatform}`);
-      await setDoc(tokenDocRef, {
-        userId,
-        token,
-        platform: actualPlatform,
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
-      console.log('[Push] Token salvo no Firestore para background queue.');
-    } catch (fsErr) {
-      console.warn('[Push] Firestore token sync note:', fsErr);
-    }
+    } catch {}
   } catch (err) {
-    console.warn('[Push] Erro geral ao salvar token:', err);
+    console.warn('[Native Push] Erro geral ao salvar token:', err);
   }
 }
 
 /**
- * Listen for foreground push messages
+ * Listen for foreground push messages on Android
  */
-export function setupForegroundMessageListener(onNotification: (payload: any) => void) {
-  // If native Android, PushNotifications handles foreground messages
-  if (Capacitor.isNativePlatform()) {
-    if (!nativeListenersInitialized) {
-      nativeListenersInitialized = true;
-      PushNotifications.addListener('pushNotificationReceived', (notification: PushNotificationSchema) => {
-        console.log('[Native Push] Foreground notification recebida:', notification);
+export function setupForegroundMessageListener(onNotification: (payload: any) => void): void {
+  if (!Capacitor.isNativePlatform()) return;
+
+  try {
+    PushNotifications.addListener('pushNotificationReceived', (notification: PushNotificationSchema) => {
+      try {
+        console.log('[Native Push] Notificação recebida em foreground:', notification);
         onNotification({
           notification: {
             title: notification.title,
@@ -305,106 +245,55 @@ export function setupForegroundMessageListener(onNotification: (payload: any) =>
           },
           data: notification.data
         });
-      }).catch(() => {});
-    }
-    return;
+      } catch (err) {
+        console.error('[Native Push] Erro no callback de pushNotificationReceived:', err);
+      }
+    }).catch(() => {});
+  } catch (err) {
+    console.warn('[Native Push] Erro ao registrar foreground listener:', err);
   }
-
-  // Web Browser flow
-  isSupported().then((supported) => {
-    if (!supported) return;
-    try {
-      const messaging = getMessaging(app);
-      onMessage(messaging, (payload) => {
-        console.log('[FCM Web] Foreground push message received:', payload);
-        onNotification(payload);
-
-        if (Notification.permission === 'granted') {
-          const title = payload.notification?.title || payload.data?.title || 'GSI PRO';
-          new Notification(title, {
-            body: payload.notification?.body || payload.data?.body || 'Nova notificação!',
-            icon: '/icons/icon-192.png',
-            tag: payload.data?.tag || 'gsi-notification'
-          });
-        }
-      });
-    } catch (err) {
-      console.warn('[FCM Web] Foreground listener note:', err);
-    }
-  });
 }
 
 /**
- * Send a background test push notification
- * Works with the app completely closed!
+ * Dispatches a test push notification to this Android device via backend
  */
 export async function testBackgroundNotification(delaySeconds: number = 4): Promise<boolean> {
   const token = localStorage.getItem('gsi_fcm_token');
-  const platform = localStorage.getItem('gsi_platform') || (Capacitor.isNativePlatform() ? 'android' : 'web-push');
 
   if (!token) {
-    alert('Nenhum token de notificação encontrado. Por favor, ative as notificações primeiro.');
+    alert('Nenhum token FCM nativo encontrado. Ative as notificações no app primeiro.');
     return false;
   }
 
   try {
-    const isJson = typeof token === 'string' && token.startsWith('{');
     const resp = await fetch('/api/test-push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        token: isJson ? undefined : token,
-        subscription: isJson ? JSON.parse(token) : undefined,
-        platform: Capacitor.isNativePlatform() ? 'android' : platform,
+        token,
+        platform: 'android',
         delaySeconds
       })
     });
     return resp.ok;
   } catch (err) {
-    console.warn('[Test Push] Erro ao disparar teste:', err);
+    console.warn('[Native Push] Erro ao disparar teste push:', err);
     return false;
   }
 }
 
 /**
- * Sync shift reminder schedule with the Service Worker
- */
-export async function syncRemindersWithServiceWorker(settings: {
-  enabled: boolean;
-  entryHour: number;
-  entryMinute?: number;
-  exitHour: number;
-  exitMinute?: number;
-  days?: number[];
-}): Promise<void> {
-  if (typeof window === 'undefined' || !('serviceWorker' in navigator) || Capacitor.isNativePlatform()) return;
-
-  try {
-    const registration = await navigator.serviceWorker.ready;
-    if (registration && registration.active) {
-      registration.active.postMessage({
-        type: 'SYNC_REMINDER_SETTINGS',
-        settings
-      });
-    }
-  } catch (err) {
-    console.warn('[FCM] Error syncing reminders with SW:', err);
-  }
-}
-
-/**
- * 4. Triggers background push notification for recipient (wakes up closed phones!)
+ * Trigger push notification for recipient (private message, group message, calls, announcements)
  */
 export async function triggerBackgroundNotification(notification: {
   senderId: string;
   senderName: string;
-  recipientId: string; // Recipient User ID, 'all' (announcements), or 'group_{groupId}'
+  recipientId: string;
   title: string;
   body: string;
   type: 'private_message' | 'group_message' | 'announcement' | 'call';
   data?: Record<string, string>;
 }): Promise<void> {
-  // 1. Dispatch through server endpoint (handles Android Native FCM + Web Push)
   try {
     const resp = await fetch('/api/send-push', {
       method: 'POST',
@@ -421,24 +310,20 @@ export async function triggerBackgroundNotification(notification: {
         }
       })
     });
-    const result = await resp.json();
-    console.log('[Push API] Notificação enviada:', result);
-  } catch (pushErr) {
-    console.warn('[Push API] Falha na requisição de push:', pushErr);
+    const result = await resp.json().catch(() => null);
+    console.log('[Native Push] Envio de notificação para destinatário concluído:', result);
+  } catch (err) {
+    console.warn('[Native Push] Erro ao disparar notificação:', err);
   }
+}
 
-  // 2. Also log to Firestore queue as fallback
-  try {
-    await addDoc(collection(db, 'fcm_notifications_queue'), {
-      senderId: notification.senderId,
-      senderName: notification.senderName,
-      recipientId: notification.recipientId,
-      title: notification.title,
-      body: notification.body,
-      type: notification.type,
-      status: 'pending',
-      createdAt: serverTimestamp(),
-      data: notification.data || {}
-    });
-  } catch (err) {}
+/**
+ * Deprecated no-ops for backwards compatibility if referenced
+ */
+export async function registerFCMServiceWorker(): Promise<null> {
+  return null;
+}
+
+export async function syncRemindersWithServiceWorker(): Promise<void> {
+  // No-op: Web Service Worker push removed
 }

@@ -7,17 +7,15 @@ import {
   AlertTriangle, 
   Clock, 
   Smartphone, 
-  ShieldCheck, 
   Send, 
   RefreshCw, 
-  Calendar,
   Sparkles,
   Info
 } from 'lucide-react';
 import { 
-  requestFCMToken, 
-  testBackgroundNotification, 
-  syncRemindersWithServiceWorker 
+  requestNativeNotificationPermission, 
+  testBackgroundNotification,
+  checkNativeNotificationPermission 
 } from '../services/firebaseMessaging';
 import { Capacitor } from '@capacitor/core';
 import { PushNotifications } from '@capacitor/push-notifications';
@@ -37,37 +35,44 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
   const [exitHour, setExitHour] = useState(17);
   const [activeDays, setActiveDays] = useState<number[]>([1, 2, 3, 4, 5, 6]);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const isAndroidNative = Capacitor.isNativePlatform();
 
   useEffect(() => {
     if (Capacitor.isNativePlatform()) {
-      PushNotifications.checkPermissions().then(status => {
-        setPermission(status.receive === 'granted' ? 'granted' : 'default');
-      }).catch(() => {});
+      PushNotifications.checkPermissions()
+        .then(status => {
+          setPermission(status.receive === 'granted' ? 'granted' : 'default');
+        })
+        .catch(() => {});
       setFcmToken(localStorage.getItem('gsi_fcm_token'));
-    } else if (typeof window !== 'undefined' && 'Notification' in window) {
-      setPermission(Notification.permission);
-      setFcmToken(localStorage.getItem('gsi_fcm_token'));
+    } else {
+      setPermission('default');
+      setFcmToken(null);
     }
   }, [isOpen]);
 
-  const handleActivateFCM = async () => {
+  const handleActivateNative = async () => {
+    if (!isAndroidNative) {
+      alert('As notificações nativas estão disponíveis exclusivamente no aplicativo Android (Capacitor).');
+      return;
+    }
+
     setIsActivating(true);
     try {
-      const token = await requestFCMToken(userId);
+      const token = await requestNativeNotificationPermission(userId);
       if (token) {
         setFcmToken(token);
         setPermission('granted');
-        await syncRemindersWithServiceWorker({
-          enabled: true,
-          entryHour,
-          exitHour,
-          days: activeDays
-        });
       } else {
-        alert('Não foi possível ativar as notificações push. Verifique se concedeu permissão nas configurações do sistema.');
+        const isGranted = await checkNativeNotificationPermission();
+        if (isGranted) {
+          setPermission('granted');
+        } else {
+          alert('Não foi possível ativar as notificações. Conceda a permissão no diálogo do Android ou nas configurações do aplicativo.');
+        }
       }
     } catch (err: any) {
-      console.error('Error activating FCM:', err);
+      console.error('Erro ao ativar notificações nativas:', err);
     } finally {
       setIsActivating(false);
     }
@@ -75,13 +80,16 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
 
   const handleTestNotification = async () => {
     if (permission !== 'granted') {
-      await handleActivateFCM();
+      await handleActivateNative();
       return;
     }
 
     setTestCountdown(5);
     const success = await testBackgroundNotification(5);
-    if (!success) return;
+    if (!success) {
+      setTestCountdown(null);
+      return;
+    }
 
     let timeLeft = 5;
     const interval = setInterval(() => {
@@ -94,13 +102,13 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
     }, 1000);
   };
 
-  const handleSaveSchedule = async () => {
-    await syncRemindersWithServiceWorker({
+  const handleSaveSchedule = () => {
+    localStorage.setItem('gsi_ponto_reminders', JSON.stringify({
       enabled: true,
       entryHour,
       exitHour,
       days: activeDays
-    });
+    }));
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 3000);
   };
@@ -134,10 +142,10 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
               </div>
               <div>
                 <h3 className="text-base font-black text-white uppercase tracking-wider">
-                  Notificações Push (FCM)
+                  Notificações Nativas Android
                 </h3>
                 <p className="text-[10px] font-bold text-[#d4af37] uppercase tracking-widest">
-                  Alertas com o App Fechado
+                  Alertas em Tempo Real
                 </p>
               </div>
             </div>
@@ -149,7 +157,7 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
             </button>
           </div>
 
-          {/* FCM Status Badge */}
+          {/* Android FCM Status Badge */}
           <div className={`p-4 rounded-2xl border flex items-center gap-3 ${
             permission === 'granted' && fcmToken
               ? 'bg-green-500/10 border-green-500/30 text-green-400'
@@ -163,33 +171,33 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
             <div className="min-w-0 flex-1">
               <p className="text-xs font-black uppercase tracking-wider">
                 {permission === 'granted' && fcmToken
-                  ? 'Alertas em Segundo Plano Ativos'
-                  : 'Ativação Necessária'}
+                  ? 'Notificações Nativas Ativas'
+                  : 'Ativação Pendente'}
               </p>
               <p className="text-[10px] opacity-80 mt-0.5">
                 {permission === 'granted' && fcmToken
-                  ? 'O dispositivo está registrado no Firebase Cloud Messaging e receberá lembretes mesmo fechado.'
-                  : 'Autorize as notificações push para que o sistema alerte os horários de entrada e saída.'}
+                  ? 'Dispositivo Android registrado com sucesso no Firebase Cloud Messaging.'
+                  : 'Autorize as notificações do Android para receber alertas de chamadas e mensagens.'}
               </p>
             </div>
           </div>
 
-          {/* Action to Request / Re-sync FCM Token */}
+          {/* Action to Request Native Permission & Token */}
           {(!fcmToken || permission !== 'granted') && (
             <button
-              onClick={handleActivateFCM}
+              onClick={handleActivateNative}
               disabled={isActivating}
               className="w-full py-4 bg-[#d4af37] text-black font-black uppercase text-xs tracking-[0.2em] rounded-2xl shadow-xl shadow-[#d4af37]/20 hover:scale-[1.02] active:scale-98 transition-all flex items-center justify-center gap-2"
             >
               {isActivating ? (
                 <>
                   <RefreshCw size={16} className="animate-spin" />
-                  Conectando ao Firebase...
+                  Conectando ao Android...
                 </>
               ) : (
                 <>
                   <Sparkles size={16} />
-                  Ativar Alertas no Meu Dispositivo
+                  Ativar Notificações no Android
                 </>
               )}
             </button>
@@ -201,10 +209,10 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
               <div>
                 <h4 className="text-xs font-black text-white uppercase tracking-wider flex items-center gap-2">
                   <Smartphone size={16} className="text-[#d4af37]" />
-                  Teste de Notificação com App Fechado
+                  Teste de Notificação Nativa
                 </h4>
                 <p className="text-[10px] text-white/40 mt-0.5">
-                  Dispara um alerta push em 5 segundos para você testar com a tela bloqueada ou app minimizado.
+                  Dispara um alerta nativo em 5 segundos para você testar com a tela bloqueada ou app em segundo plano.
                 </p>
               </div>
             </div>
@@ -212,10 +220,10 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
             {testCountdown !== null ? (
               <div className="p-4 bg-[#d4af37]/20 border border-[#d4af37]/40 rounded-xl text-center space-y-1 animate-pulse">
                 <p className="text-sm font-black text-[#d4af37] uppercase">
-                  Feche ou minimize o app agora! ({testCountdown}s)
+                  Minimize o app agora! ({testCountdown}s)
                 </p>
                 <p className="text-[9px] text-white/70">
-                  O alerta via Firebase Cloud Messaging surgirá no seu celular / computador.
+                  O alerta nativo com som e vibração aparecerá na barra de status do Android.
                 </p>
               </div>
             ) : (
@@ -224,7 +232,7 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
                 className="w-full py-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-black uppercase text-[10px] tracking-widest rounded-xl transition-all flex items-center justify-center gap-2"
               >
                 <Send size={14} className="text-[#d4af37]" />
-                Testar Alerta com App Fechado
+                Testar Alerta no Dispositivo
               </button>
             )}
           </div>
@@ -286,8 +294,8 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
                   const isActive = activeDays.includes(d.id);
                   return (
                     <button
-                      key={d.id}
                       type="button"
+                      key={d.id}
                       onClick={() => toggleDay(d.id)}
                       className={`py-2.5 rounded-xl font-black text-[10px] uppercase transition-all ${
                         isActive
@@ -309,10 +317,10 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
               {saveSuccess ? (
                 <>
                   <CheckCircle size={15} className="text-green-400" />
-                  Horários Sincronizados com o Service Worker!
+                  Horários Salvos com Sucesso!
                 </>
               ) : (
-                'Salvar e Sincronizar Horários'
+                'Salvar Horários de Alerta'
               )}
             </button>
           </div>
@@ -321,7 +329,7 @@ export default function FCMPushModal({ isOpen, onClose, userId }: FCMPushModalPr
           <div className="p-4 bg-white/[0.03] border border-white/5 rounded-2xl flex items-start gap-3">
             <Info size={16} className="text-[#d4af37] flex-shrink-0 mt-0.5" />
             <p className="text-[10px] text-white/50 leading-relaxed">
-              <strong>Como funciona com o app fechado:</strong> O Service Worker do Firebase Cloud Messaging roda em segundo plano através do sistema operacional e do navegador, disparando as notificações diretamente na barra de status do seu dispositivo.
+              <strong>Notificações Nativas do Sistema:</strong> O canal de alta prioridade do Android garante banner heads-up, som de alta intensidade e vibração mesmo com o dispositivo bloqueado ou em segundo plano.
             </p>
           </div>
         </motion.div>
