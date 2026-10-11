@@ -1,3 +1,5 @@
+import { startCallVibration, stopCallVibration } from './haptics';
+
 /**
  * GSI PRO - Sistema de Sons Premium
  */
@@ -63,12 +65,15 @@ export const playNotificationSound = () => {
   } catch (e) {}
 };
 
+
 let ringtoneInterval: any = null;
 
 export const startIncomingCallRingtone = () => {
   stopIncomingCallRingtone();
   try {
+    startCallVibration();
     const playRingCycle = () => {
+
       const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const now = ctx.currentTime;
       // Phone dual tone: 440Hz + 480Hz
@@ -98,6 +103,7 @@ export const startIncomingCallRingtone = () => {
 };
 
 export const stopIncomingCallRingtone = () => {
+  stopCallVibration();
   if (ringtoneInterval) {
     clearInterval(ringtoneInterval);
     ringtoneInterval = null;

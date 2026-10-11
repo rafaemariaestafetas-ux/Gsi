@@ -71,3 +71,30 @@ export const triggerMessageReceivedHaptic = async () => {
     // Silencioso
   }
 };
+
+// Vibração contínua para chamada a entrar
+let callVibrationInterval: any = null;
+
+export const startCallVibration = () => {
+  stopCallVibration();
+  const vibrateStep = async () => {
+    try {
+      if (Capacitor.isNativePlatform()) {
+        await Haptics.impact({ style: ImpactStyle.Heavy });
+      } else if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate([200, 100, 200, 100, 300]);
+      }
+    } catch {}
+  };
+  vibrateStep();
+  callVibrationInterval = setInterval(vibrateStep, 2000);
+};
+
+export const stopCallVibration = () => {
+  if (callVibrationInterval) {
+    clearInterval(callVibrationInterval);
+    callVibrationInterval = null;
+  }
+};
+
+

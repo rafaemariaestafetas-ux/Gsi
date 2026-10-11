@@ -39,7 +39,9 @@ import {
   Paperclip,
   ExternalLink,
   Plus,
-  Palette
+  Palette,
+  Clock,
+  WifiOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
@@ -52,8 +54,15 @@ import { getCurrentLocation } from '../lib/locationService';
 import { Capacitor } from '@capacitor/core';
 import { Keyboard } from '@capacitor/keyboard';
 import { CHAT_THEMES, ChatThemeId, getStoredChatTheme, setStoredChatTheme } from '../lib/chatThemes';
+import { isOnline } from '../services/networkService';
+import { addToQueue } from '../services/offlineSyncService';
+import IncomingCallScreen from './IncomingCallScreen';
+import ActiveCallScreen, { CallStatusType } from './ActiveCallScreen';
+import { showGlobalToast } from '../lib/ToastContext';
+import { startIncomingCallRingtone, stopIncomingCallRingtone } from '../lib/sounds';
 
 interface MessengerProps {
+  isOpen?: boolean;
   onClose: () => void;
   currentUserId: string;
   userName?: string;
@@ -61,6 +70,8 @@ interface MessengerProps {
   onlineUsers: Map<string, any>;
   incomingCallSignal?: any;
   onClearIncomingCallSignal?: () => void;
+  initialTab?: 'direct' | 'groups';
+  embedded?: boolean;
 }
 
 export default function Messenger({ 
@@ -70,10 +81,18 @@ export default function Messenger({
   userAvatar,
   onlineUsers,
   incomingCallSignal,
-  onClearIncomingCallSignal
+  onClearIncomingCallSignal,
+  initialTab = 'groups',
+  embedded = false
 }: MessengerProps) {
   // Navigation tabs: 'direct' (private chats) or 'groups' (team groups)
-  const [activeTab, setActiveTab] = useState<'direct' | 'groups'>('groups');
+  const [activeTab, setActiveTab] = useState<'direct' | 'groups'>(initialTab);
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
 
   // Direct chat states
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -104,13 +123,16 @@ export default function Messenger({
   }, [selectedGroup]);
   
   // Daily.co Calling state variables
-  const [callState, setCallState] = useState<'idle' | 'outgoing' | 'incoming' | 'connected'>('idle');
+  const [callState, setCallState] = useState<'idle' | 'outgoing' | 'incoming' | 'connected' | 'reconnecting' | 'ended'>('idle');
   const [callType, setCallType] = useState<'video' | 'audio'>('video');
   const [callUser, setCallUser] = useState<Profile | null>(null);
   const [callRoomUrl, setCallRoomUrl] = useState<string | null>(null);
   const [callRoomName, setCallRoomName] = useState<string | null>(null);
   const [isCallMuted, setIsCallMuted] = useState(false);
   const [isCallCameraOff, setIsCallCameraOff] = useState(false);
+  const [isSpeakerOn, setIsSpeakerOn] = useState(true);
+  const [isRemoteCameraOff, setIsRemoteCameraOff] = useState(false);
+  const [callDurationSec, setCallDurationSec] = useState(0);
 
   // Audio elements for call sounds
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
@@ -124,6 +146,23 @@ export default function Messenger({
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const callStartTimeRef = useRef<number | null>(null);
   const outgoingTimeoutRef = useRef<any>(null);
+
+  // Duration counter timer while call is connected
+  useEffect(() => {
+    let interval: any = null;
+    if ((callState === 'connected' || callState === 'reconnecting') && callStartTimeRef.current) {
+      interval = setInterval(() => {
+        if (callStartTimeRef.current) {
+          setCallDurationSec(Math.floor((Date.now() - callStartTimeRef.current) / 1000));
+        }
+      }, 1000);
+    } else if (callState === 'idle') {
+      setCallDurationSec(0);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [callState]);
 
   // Synchronize Daily.co audio and video tracks to media elements
   const syncDailyTracks = useCallback(() => {
@@ -148,10 +187,13 @@ export default function Messenger({
       const remotes = (Object.values(participants) as any[]).filter(p => !p.local);
       if (remotes.length > 0) {
         const remote = remotes[0];
+        const remoteVideoTrack = remote?.tracks?.video?.persistentTrack;
+        const isRemoteOff = !remoteVideoTrack || remote?.tracks?.video?.state === 'off' || remote?.tracks?.video?.state === 'blocked';
+        setIsRemoteCameraOff(isRemoteOff);
 
         // Remote Video
-        if (remote?.tracks?.video?.persistentTrack && remoteVideoRef.current) {
-          const videoTrack = remote.tracks.video.persistentTrack;
+        if (remoteVideoTrack && remoteVideoRef.current) {
+          const videoTrack = remoteVideoTrack;
           const currentSrc = remoteVideoRef.current.srcObject as MediaStream | null;
           if (!currentSrc || currentSrc.getVideoTracks()[0]?.id !== videoTrack.id) {
             remoteVideoRef.current.srcObject = new MediaStream([videoTrack]);
@@ -170,6 +212,8 @@ export default function Messenger({
           remoteAudioRef.current.muted = false;
           remoteAudioRef.current.play().catch(e => console.warn('[Daily] Remote audio play note:', e));
         }
+      } else {
+        setIsRemoteCameraOff(true);
       }
     } catch (err) {
       console.warn('[Daily] Track sync error:', err);
@@ -178,7 +222,7 @@ export default function Messenger({
 
   // Continuous track sync while call is connected
   useEffect(() => {
-    if (callState === 'connected') {
+    if (callState === 'connected' || callState === 'reconnecting') {
       syncDailyTracks();
       const interval = setInterval(syncDailyTracks, 1000);
       return () => clearInterval(interval);
@@ -471,6 +515,20 @@ export default function Messenger({
 
   useEffect(() => {
     fetchInitialData();
+
+    const handleOfflineSyncCompleted = () => {
+      if (selectedUserRef.current) {
+        fetchMessages(selectedUserRef.current.id);
+      }
+      if (selectedGroupRef.current) {
+        fetchGroupMessages(selectedGroupRef.current.id);
+      }
+    };
+
+    window.addEventListener('gsi:offline_sync_completed', handleOfflineSyncCompleted);
+    return () => {
+      window.removeEventListener('gsi:offline_sync_completed', handleOfflineSyncCompleted);
+    };
   }, []);
 
   const fetchInitialData = async () => {
@@ -808,7 +866,7 @@ export default function Messenger({
           setCallUser(null);
           setCallRoomUrl(null);
           setCallRoomName(null);
-          alert(type === 'call-busy' ? 'O destinatário está ocupado.' : 'Chamada recusada.');
+          showGlobalToast(type === 'call-busy' ? 'O destinatário está ocupado.' : 'Chamada recusada.', 'info');
         }
         break;
 
@@ -1008,6 +1066,7 @@ export default function Messenger({
   };
 
   const playRingtone = () => {
+    startIncomingCallRingtone();
     if (ringtoneRef.current) ringtoneRef.current.pause();
     ringtoneRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/1359/1359-preview.mp3');
     ringtoneRef.current.loop = true;
@@ -1016,10 +1075,32 @@ export default function Messenger({
   };
 
   const stopRingtone = () => {
+    stopIncomingCallRingtone();
     if (ringtoneRef.current) {
       ringtoneRef.current.pause();
       ringtoneRef.current = null;
     }
+  };
+
+  const flipCallCamera = async () => {
+    if (dailyCallRef.current) {
+      try {
+        await (dailyCallRef.current as any).cycleCamera();
+        syncDailyTracks();
+        showGlobalToast('Câmara alternada', 'info');
+      } catch (e) {
+        console.warn('[Daily.co] Flip camera note:', e);
+      }
+    }
+  };
+
+  const toggleSpeaker = () => {
+    const nextSpeaker = !isSpeakerOn;
+    setIsSpeakerOn(nextSpeaker);
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.volume = nextSpeaker ? 1.0 : 0.2;
+    }
+    showGlobalToast(nextSpeaker ? 'Altifalante ligado' : 'Altifalante atenuado', 'info');
   };
 
   const playDialtone = () => {
@@ -1122,8 +1203,24 @@ export default function Messenger({
       }
     });
 
+    call.on('network-connection', (evt: any) => {
+      console.log('[Daily.co] Network connection state:', evt);
+      if (evt?.event === 'interrupted') {
+        setCallState('reconnecting');
+        showGlobalToast('Ligação fraca. A reconectar...', 'warning');
+      } else if (evt?.event === 'connected') {
+        setCallState('connected');
+      }
+    });
+
+    call.on('camera-error', (err) => {
+      console.warn('[Daily.co] Camera error:', err);
+      showGlobalToast('Câmara indisponível ou sem permissão.', 'error');
+    });
+
     call.on('error', (err) => {
       console.error('[Daily.co] Call error event:', err);
+      showGlobalToast('Erro na ligação da chamada.', 'error');
     });
 
     call.on('left-meeting', () => {
@@ -1150,7 +1247,7 @@ export default function Messenger({
       syncDailyTracks();
     } catch (joinErr) {
       console.error('[Daily.co] Error joining room:', joinErr);
-      alert('Não foi possível conectar à chamada Daily.co. Verifique a sua ligação.');
+      showGlobalToast('Não foi possível conectar à chamada. Verifique a sua ligação.', 'error');
       handleHangUpLocal(true);
     }
   };
@@ -1338,10 +1435,6 @@ export default function Messenger({
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
 
     callStartTimeRef.current = null;
-    setCallState('idle');
-    setCallUser(null);
-    setCallRoomUrl(null);
-    setCallRoomName(null);
     setIsCallMuted(false);
     setIsCallCameraOff(false);
 
@@ -1349,7 +1442,7 @@ export default function Messenger({
     if (partner) {
       if (previousState === 'outgoing') {
         await recordCallMessage(partner.id, 'missed', cType, undefined, rUrl, rName);
-      } else if (previousState === 'connected' && startTime) {
+      } else if ((previousState === 'connected' || previousState === 'reconnecting') && startTime) {
         const durationSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
         await recordCallMessage(partner.id, 'completed', cType, durationSec, rUrl, rName);
         if (rName) {
@@ -1362,6 +1455,25 @@ export default function Messenger({
           } catch {}
         }
       }
+    }
+
+    if ((previousState === 'connected' || previousState === 'reconnecting') && startTime) {
+      const dur = Math.max(1, Math.round((Date.now() - startTime) / 1000));
+      setCallDurationSec(dur);
+      setCallState('ended');
+      setTimeout(() => {
+        setCallState('idle');
+        setCallUser(null);
+        setCallRoomUrl(null);
+        setCallRoomName(null);
+        setCallDurationSec(0);
+      }, 2400);
+    } else {
+      setCallState('idle');
+      setCallUser(null);
+      setCallRoomUrl(null);
+      setCallRoomName(null);
+      setCallDurationSec(0);
     }
   };
 
@@ -1378,11 +1490,26 @@ export default function Messenger({
   }, [groupMessages]);
 
   const fetchProfiles = async () => {
-    const { data } = await supabase
-      .from('profiles')
-      .select('*')
-      .neq('id', currentUserId);
-    if (data) setProfiles(data);
+    try {
+      const cached = localStorage.getItem('gsi_cached_profiles');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) setProfiles(parsed);
+      }
+    } catch {}
+
+    if (!isOnline()) return;
+
+    try {
+      const { data } = await supabase
+        .from('profiles')
+        .select('*')
+        .neq('id', currentUserId);
+      if (data) {
+        setProfiles(data);
+        localStorage.setItem('gsi_cached_profiles', JSON.stringify(data));
+      }
+    } catch {}
   };
 
   const fetchBlocks = async () => {
@@ -1468,6 +1595,16 @@ export default function Messenger({
 
   const fetchGroups = async () => {
     try {
+      const cached = localStorage.getItem('gsi_cached_groups');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) setGroups(parsed);
+      }
+    } catch {}
+
+    if (!isOnline()) return;
+
+    try {
       const { data: memData } = await supabase
         .from('group_members')
         .select('group_id')
@@ -1487,6 +1624,7 @@ export default function Messenger({
           member_count: g.group_members?.[0]?.count || 0
         }));
         setGroups(mapped);
+        try { localStorage.setItem('gsi_cached_groups', JSON.stringify(mapped)); } catch {}
         fetchGroupUnreadCounts(mapped);
       }
     } catch (err) {
@@ -1532,6 +1670,22 @@ export default function Messenger({
   const fetchMessages = async (targetUserId?: string) => {
     const otherId = targetUserId || selectedUserRef.current?.id;
     if (!otherId) return;
+
+    const cacheKey = `gsi_chat_cache_${otherId}`;
+
+    // Read cache first for instant offline or fast load
+    try {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const parsedCached = JSON.parse(cached);
+        if (Array.isArray(parsedCached) && parsedCached.length > 0) {
+          setMessages(prev => (prev.length === 0 ? parsedCached : prev));
+        }
+      }
+    } catch {}
+
+    if (!isOnline()) return;
+
     try {
       const { data, error } = await supabase
         .from('messages')
@@ -1561,10 +1715,14 @@ export default function Messenger({
         });
 
         setMessages(prev => {
-          if (JSON.stringify(prev) === JSON.stringify(parsed)) {
+          // Keep any local pending messages in flight
+          const pending = prev.filter(m => m.sync_status === 'pending' || m.sync_status === 'sending');
+          const combined = [...parsed, ...pending];
+          try { localStorage.setItem(cacheKey, JSON.stringify(combined)); } catch {}
+          if (JSON.stringify(prev) === JSON.stringify(combined)) {
             return prev;
           }
-          return parsed;
+          return combined;
         });
       }
     } catch (err) {
@@ -1575,6 +1733,22 @@ export default function Messenger({
   const fetchGroupMessages = async (targetGroupId?: string) => {
     const gid = targetGroupId || selectedGroupRef.current?.id;
     if (!gid) return;
+
+    const cacheKey = `gsi_group_cache_${gid}`;
+
+    // Read cache first for instant offline or fast load
+    try {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const parsedCached = JSON.parse(cached);
+        if (Array.isArray(parsedCached) && parsedCached.length > 0) {
+          setGroupMessages(prev => (prev.length === 0 ? parsedCached : prev));
+        }
+      }
+    } catch {}
+
+    if (!isOnline()) return;
+
     try {
       const { data, error } = await supabase
         .from('group_messages')
@@ -1600,10 +1774,14 @@ export default function Messenger({
         });
 
         setGroupMessages(prev => {
-          if (JSON.stringify(prev) === JSON.stringify(parsed)) {
+          // Keep any local pending messages in flight
+          const pending = prev.filter(m => m.sync_status === 'pending' || m.sync_status === 'sending');
+          const combined = [...parsed, ...pending];
+          try { localStorage.setItem(cacheKey, JSON.stringify(combined)); } catch {}
+          if (JSON.stringify(prev) === JSON.stringify(combined)) {
             return prev;
           }
-          return parsed;
+          return combined;
         });
       }
     } catch (err) {
@@ -1761,6 +1939,7 @@ export default function Messenger({
     if (!selectedUser || isUserBlocked || amIBlocked) return;
     if (type === 'text' && !newMessage.trim()) return;
     
+    const isOfflineMode = !isOnline();
     const isViewOnce = !!metaOptions?.is_view_once;
     const rawText = type === 'text' ? newMessage : (customCaption || '');
     const dbContent = encodeMessageContent(rawText, replyingTo || undefined, undefined, {
@@ -1784,18 +1963,23 @@ export default function Messenger({
       is_view_once: isViewOnce,
       view_once_opened: false,
       opened_by: [],
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      sync_status: isOfflineMode ? 'pending' : 'sending'
     };
 
     const parsedOptimistic = parseMessage(messageData);
 
     // Optimistically add to messages
-    setMessages(prev => [...prev, parsedOptimistic]);
+    setMessages(prev => {
+      const next = [...prev, parsedOptimistic];
+      try { localStorage.setItem(`gsi_chat_cache_${selectedUser.id}`, JSON.stringify(next)); } catch {}
+      return next;
+    });
 
     const contentPreview = type === 'text' ? newMessage : (type === 'audio' ? '🎵 Mensagem de áudio' : isViewOnce ? '📷 Foto de visualização única (1)' : '📷 Imagem');
 
-    // Broadcast immediately over active WebSockets channel for instant 0ms arrival
-    if (activeChannelRef.current) {
+    // Broadcast immediately over active WebSockets channel if online
+    if (!isOfflineMode && activeChannelRef.current) {
       activeChannelRef.current.send({
         type: 'broadcast',
         event: 'new_message',
@@ -1817,6 +2001,20 @@ export default function Messenger({
       setAudioPreviewUrl(null);
     }
     playSendSound();
+
+    // If offline, enqueue immediately and stop
+    if (isOfflineMode) {
+      addToQueue('message', {
+        id: tempId,
+        content: dbContent,
+        sender_id: currentUserId,
+        receiver_id: selectedUser.id,
+        media_url: mediaUrl || null,
+        type: metaOptions?.type || type,
+        is_group: false
+      });
+      return;
+    }
 
     // Clean payload containing ONLY valid columns of the messages table in PostgreSQL
     const dbPayload: any = {
@@ -1854,9 +2052,14 @@ export default function Messenger({
         reply_to: savedReplyTo, 
         is_view_once: isViewOnce,
         poll: metaOptions?.poll,
-        location: metaOptions?.location
+        location: metaOptions?.location,
+        sync_status: 'synced'
       });
-      setMessages(prev => prev.map(m => (m.id === tempId || m === parsedOptimistic) ? confirmedMessage : m));
+      setMessages(prev => {
+        const next = prev.map(m => (m.id === tempId || m === parsedOptimistic) ? confirmedMessage : m);
+        try { localStorage.setItem(`gsi_chat_cache_${selectedUser.id}`, JSON.stringify(next)); } catch {}
+        return next;
+      });
 
       triggerBackgroundNotification({
         senderId: currentUserId,
@@ -1868,8 +2071,21 @@ export default function Messenger({
         data: { url: '/messages' }
       });
     } else if (error) {
-      console.warn('[Messenger] Database note inserting message:', error);
-      // Keep optimistic message so the user never loses the sent message from UI
+      console.warn('[Messenger] Database note inserting message, adding to offline queue:', error);
+      setMessages(prev => {
+        const next = prev.map(m => m.id === tempId ? { ...m, sync_status: 'pending' as const } : m);
+        try { localStorage.setItem(`gsi_chat_cache_${selectedUser.id}`, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      addToQueue('message', {
+        id: tempId,
+        content: dbContent,
+        sender_id: currentUserId,
+        receiver_id: selectedUser.id,
+        media_url: mediaUrl || null,
+        type: metaOptions?.type || type,
+        is_group: false
+      });
     }
   };
 
@@ -1883,6 +2099,7 @@ export default function Messenger({
     if (type === 'text' && !newMessage.trim()) return;
 
     try {
+      const isOfflineMode = !isOnline();
       const isViewOnce = !!metaOptions?.is_view_once;
       const contentPreview = type === 'text' ? newMessage : (type === 'audio' ? '🎵 Mensagem de áudio' : type === 'location' ? '📍 Localização Partilhada' : type === 'poll' ? '📊 Enquete de Votação' : isViewOnce ? '📷 Foto de visualização única (1)' : '📷 Imagem');
       const rawText = type === 'text' ? newMessage : (customCaption || '');
@@ -1908,16 +2125,21 @@ export default function Messenger({
         is_view_once: isViewOnce,
         view_once_opened: false,
         opened_by: [],
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        sync_status: isOfflineMode ? 'pending' : 'sending'
       };
 
       const parsedOptimistic = parseMessage(messageData);
 
       // Optimistically add to group messages
-      setGroupMessages(prev => [...prev, parsedOptimistic]);
+      setGroupMessages(prev => {
+        const next = [...prev, parsedOptimistic];
+        try { localStorage.setItem(`gsi_group_cache_${selectedGroup.id}`, JSON.stringify(next)); } catch {}
+        return next;
+      });
 
-      // Broadcast immediately to active group channel
-      if (activeGroupChannelRef.current) {
+      // Broadcast immediately to active group channel if online
+      if (!isOfflineMode && activeGroupChannelRef.current) {
         activeGroupChannelRef.current.send({
           type: 'broadcast',
           event: 'new_message',
@@ -1935,6 +2157,20 @@ export default function Messenger({
       setReplyingTo(null);
       setAudioBlob(null);
       playSendSound();
+
+      if (isOfflineMode) {
+        addToQueue('message', {
+          id: tempId,
+          group_id: selectedGroup.id,
+          sender_id: currentUserId,
+          sender_name: userName,
+          content: dbContent,
+          type: metaOptions?.type || type,
+          media_url: mediaUrl || null,
+          is_group: true
+        });
+        return;
+      }
 
       // Clean payload containing ONLY valid columns of the group_messages table in PostgreSQL
       const dbPayload: any = {
@@ -1974,9 +2210,14 @@ export default function Messenger({
           reply_to: savedReplyTo || undefined, 
           is_view_once: isViewOnce,
           poll: metaOptions?.poll,
-          location: metaOptions?.location
+          location: metaOptions?.location,
+          sync_status: 'synced'
         });
-        setGroupMessages(prev => prev.map(m => (m.id === tempId || m === parsedOptimistic) ? parsedSaved : m));
+        setGroupMessages(prev => {
+          const next = prev.map(m => (m.id === tempId || m === parsedOptimistic) ? parsedSaved : m);
+          try { localStorage.setItem(`gsi_group_cache_${selectedGroup.id}`, JSON.stringify(next)); } catch {}
+          return next;
+        });
         
         triggerBackgroundNotification({
           senderId: currentUserId,
@@ -1988,12 +2229,25 @@ export default function Messenger({
           data: { url: '/messages', groupId: selectedGroup.id }
         });
       } else if (error) {
-        console.warn('[Messenger] Database note inserting group message:', error);
-        // Keep optimistic message so the user never loses the sent message from UI
+        console.warn('[Messenger] Database note inserting group message, adding to offline queue:', error);
+        setGroupMessages(prev => {
+          const next = prev.map(m => m.id === tempId ? { ...m, sync_status: 'pending' as const } : m);
+          try { localStorage.setItem(`gsi_group_cache_${selectedGroup.id}`, JSON.stringify(next)); } catch {}
+          return next;
+        });
+        addToQueue('message', {
+          id: tempId,
+          group_id: selectedGroup.id,
+          sender_id: currentUserId,
+          sender_name: userName,
+          content: dbContent,
+          type: metaOptions?.type || type,
+          media_url: mediaUrl || null,
+          is_group: true
+        });
       }
     } catch (err) {
       console.warn('Error sending group message in Messenger:', err);
-      // Keep optimistic message
     }
   };
 
@@ -2674,16 +2928,18 @@ export default function Messenger({
 
   return (
     <motion.div 
-      initial={{ opacity: 0, scale: 0.95, y: 20 }}
-      animate={{ opacity: 1, scale: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95, y: 20 }}
-      className="fixed inset-0 z-[100] bg-[#0a0e17] flex flex-col md:inset-auto md:right-6 md:bottom-20 md:w-[440px] md:h-[660px] md:rounded-[2.5rem] md:border md:border-white/10 md:shadow-2xl overflow-hidden"
+      initial={{ opacity: 0, scale: 0.98 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.98 }}
+      className={embedded 
+        ? "w-full h-full min-h-[560px] bg-[#0a0e17] flex flex-col rounded-3xl border border-white/5 shadow-2xl overflow-hidden relative"
+        : "fixed inset-0 z-[100] bg-[#0a0e17] flex flex-col md:inset-auto md:right-6 md:bottom-20 md:w-[440px] md:h-[660px] md:rounded-[2.5rem] md:border md:border-white/10 md:shadow-2xl overflow-hidden"}
     >
       {/* Top Header of Messenger */}
       <div 
         className="bg-[#1c2431] px-5 pb-4 flex items-center justify-between border-b border-white/5 relative z-20"
         style={{
-          paddingTop: 'calc(env(safe-area-inset-top, 0px) + 0.85rem)'
+          paddingTop: embedded ? '0.85rem' : 'calc(env(safe-area-inset-top, 0px) + 0.85rem)'
         }}
       >
         <div className="flex items-center gap-3 min-w-0">
@@ -3457,7 +3713,14 @@ export default function Messenger({
                               {format(new Date(msg.created_at), 'HH:mm')}
                             </span>
                             {isMe && (
-                              <span className="text-[8px] text-[#53bdeb] font-bold">✓✓</span>
+                              msg.sync_status === 'pending' || msg.sync_status === 'sending' ? (
+                                <span className="inline-flex items-center gap-1 text-[8px] text-amber-500 font-bold" title="A enviar...">
+                                  <Clock size={9} className="animate-spin" />
+                                  <span>a enviar...</span>
+                                </span>
+                              ) : (
+                                <span className="text-[8px] text-[#53bdeb] font-bold">✓✓</span>
+                              )
                             )}
                             {!msg.is_deleted && (
                               <button
@@ -3509,10 +3772,21 @@ export default function Messenger({
               })}
 
               {groupMessages.length === 0 && (
-                <div className="flex-1 flex flex-col items-center justify-center py-20 text-center opacity-40">
-                  <Users size={36} className="mb-2 text-[#075e54]" />
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-700">Início das mensagens do grupo</p>
-                </div>
+                !isOnline() ? (
+                  <div className="flex-1 flex flex-col items-center justify-center py-20 text-center px-6">
+                    <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-500 mb-3 shadow-inner">
+                      <WifiOff size={24} />
+                    </div>
+                    <p className="text-xs font-bold text-slate-700 max-w-xs leading-relaxed">
+                      Sem ligação. As mensagens aparecem quando estiver online.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center py-20 text-center opacity-40">
+                    <Users size={36} className="mb-2 text-[#075e54]" />
+                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-700">Início das mensagens do grupo</p>
+                  </div>
+                )
               )}
 
               {/* Group Typing Indicator Bubble */}
@@ -3645,7 +3919,7 @@ export default function Messenger({
               </div>
             ) : (
               <div 
-                className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-20 w-full max-w-full overflow-hidden transition-all duration-150"
+                className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-30 w-full max-w-full overflow-visible transition-all duration-150"
                 style={{ paddingBottom: `calc(${keyboardHeight > 0 ? `${keyboardHeight}px` : '0.5rem'} + env(safe-area-inset-bottom, 0px))` }}
               >
                 {/* Botão de Anexos WhatsApp (+) */}
@@ -3653,21 +3927,26 @@ export default function Messenger({
                   <button 
                     type="button"
                     onClick={() => setShowAttachmentMenu(prev => !prev)}
-                    className="w-9 h-9 min-w-[36px] flex items-center justify-center text-slate-600 hover:text-[#00a884] transition-colors rounded-full bg-white border border-slate-200 shadow-sm active:scale-95 flex-shrink-0"
+                    className="w-9 h-9 min-w-[36px] flex items-center justify-center text-slate-700 hover:text-[#00a884] transition-all rounded-full bg-white border border-slate-300 shadow-sm active:scale-95 flex-shrink-0"
                     title="Anexar localização, enquete ou fotos"
                   >
-                    <Plus size={18} className={`transition-transform duration-200 ${showAttachmentMenu ? 'rotate-45 text-[#00a884]' : ''}`} />
+                    <Plus size={19} className={`transition-transform duration-200 ${showAttachmentMenu ? 'rotate-45 text-[#00a884]' : ''}`} />
                   </button>
 
                   {/* WhatsApp-Style Popup Menu */}
                   <AnimatePresence>
                     {showAttachmentMenu && (
-                      <motion.div 
-                        initial={{ opacity: 0, scale: 0.9, y: 10 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.9, y: 10 }}
-                        className="absolute bottom-full mb-3 left-0 bg-[#233138] border border-white/10 rounded-3xl p-3 shadow-2xl flex flex-col gap-2 z-50 min-w-[210px]"
-                      >
+                      <>
+                        <div 
+                          className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[1px]"
+                          onClick={() => setShowAttachmentMenu(false)}
+                        />
+                        <motion.div 
+                          initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                          animate={{ opacity: 1, scale: 1, y: 0 }}
+                          exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                          className="absolute bottom-full mb-3 left-0 bg-[#233138] border border-white/10 rounded-3xl p-3 shadow-2xl flex flex-col gap-2 z-50 min-w-[220px]"
+                        >
                         {/* 1. Localização */}
                         <button
                           type="button"
@@ -3731,7 +4010,8 @@ export default function Messenger({
                           </div>
                         </button>
                       </motion.div>
-                    )}
+                    </>
+                  )}
                   </AnimatePresence>
                 </div>
 
@@ -4227,7 +4507,14 @@ export default function Messenger({
                               {format(new Date(msg.created_at), 'HH:mm')}
                             </span>
                             {isMe && (
-                              <span className="text-[8px] text-[#53bdeb] font-bold">✓✓</span>
+                              msg.sync_status === 'pending' || msg.sync_status === 'sending' ? (
+                                <span className="inline-flex items-center gap-1 text-[8px] text-amber-500 font-bold" title="A enviar...">
+                                  <Clock size={9} className="animate-spin" />
+                                  <span>a enviar...</span>
+                                </span>
+                              ) : (
+                                <span className="text-[8px] text-[#53bdeb] font-bold">✓✓</span>
+                              )
                             )}
                             {!msg.is_deleted && (
                               <button
@@ -4279,12 +4566,23 @@ export default function Messenger({
               })}
 
               {messages.length === 0 && (
-                <div className="flex-1 flex flex-col items-center justify-center py-20 text-center opacity-40">
-                  <MessageSquare size={38} className="mb-2 text-[#0084ff]" />
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-700">
-                    Comece uma conversa com<br/>{selectedUser.full_name}
-                  </p>
-                </div>
+                !isOnline() ? (
+                  <div className="flex-1 flex flex-col items-center justify-center py-20 text-center px-6">
+                    <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-500 mb-3 shadow-inner">
+                      <WifiOff size={24} />
+                    </div>
+                    <p className="text-xs font-bold text-slate-700 max-w-xs leading-relaxed">
+                      Sem ligação. As mensagens aparecem quando estiver online.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center py-20 text-center opacity-40">
+                    <MessageSquare size={38} className="mb-2 text-[#0084ff]" />
+                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-700">
+                      Comece uma conversa com<br/>{selectedUser.full_name}
+                    </p>
+                  </div>
+                )
               )}
 
               {/* Direct Partner Typing Indicator Bubble */}
@@ -4432,7 +4730,7 @@ export default function Messenger({
                   </div>
                 ) : (
                   <div 
-                    className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-20 w-full max-w-full overflow-hidden transition-all duration-150"
+                    className="p-2 sm:p-2.5 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 sm:gap-2 relative z-30 w-full max-w-full overflow-visible transition-all duration-150"
                     style={{ paddingBottom: `calc(${keyboardHeight > 0 ? `${keyboardHeight}px` : '0.5rem'} + env(safe-area-inset-bottom, 0px))` }}
                   >
                     {/* Botão de Anexos WhatsApp (+) */}
@@ -4440,84 +4738,90 @@ export default function Messenger({
                       <button 
                         type="button"
                         onClick={() => setShowAttachmentMenu(prev => !prev)}
-                        className="w-9 h-9 min-w-[36px] flex items-center justify-center text-slate-600 hover:text-[#0084ff] transition-colors rounded-full bg-white border border-slate-200 shadow-sm active:scale-95 flex-shrink-0"
+                        className="w-9 h-9 min-w-[36px] flex items-center justify-center text-slate-700 hover:text-[#0084ff] transition-all rounded-full bg-white border border-slate-300 shadow-sm active:scale-95 flex-shrink-0"
                         title="Anexar localização, enquete ou fotos"
                       >
-                        <Plus size={18} className={`transition-transform duration-200 ${showAttachmentMenu ? 'rotate-45 text-[#0084ff]' : ''}`} />
+                        <Plus size={19} className={`transition-transform duration-200 ${showAttachmentMenu ? 'rotate-45 text-[#0084ff]' : ''}`} />
                       </button>
 
                       {/* WhatsApp-Style Popup Menu */}
                       <AnimatePresence>
                         {showAttachmentMenu && (
-                          <motion.div 
-                            initial={{ opacity: 0, scale: 0.9, y: 10 }}
-                            animate={{ opacity: 1, scale: 1, y: 0 }}
-                            exit={{ opacity: 0, scale: 0.9, y: 10 }}
-                            className="absolute bottom-full mb-3 left-0 bg-[#233138] border border-white/10 rounded-3xl p-3 shadow-2xl flex flex-col gap-2 z-50 min-w-[210px]"
-                          >
-                            {/* 1. Localização */}
-                            <button
-                              type="button"
-                              onClick={sendLocationMessage}
-                              className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                          <>
+                            <div 
+                              className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[1px]"
+                              onClick={() => setShowAttachmentMenu(false)}
+                            />
+                            <motion.div 
+                              initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                              animate={{ opacity: 1, scale: 1, y: 0 }}
+                              exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                              className="absolute bottom-full mb-3 left-0 bg-[#233138] border border-white/10 rounded-3xl p-3 shadow-2xl flex flex-col gap-2 z-50 min-w-[220px]"
                             >
-                              <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
-                                <MapPin size={18} />
-                              </div>
-                              <div>
-                                <p className="text-xs font-black text-white leading-tight">Localização</p>
-                                <p className="text-[9px] text-white/40">Onde estou agora (GPS)</p>
-                              </div>
-                            </button>
+                              {/* 1. Localização */}
+                              <button
+                                type="button"
+                                onClick={sendLocationMessage}
+                                className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                              >
+                                <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+                                  <MapPin size={18} />
+                                </div>
+                                <div>
+                                  <p className="text-xs font-black text-white leading-tight">Localização</p>
+                                  <p className="text-[9px] text-white/40">Onde estou agora (GPS)</p>
+                                </div>
+                              </button>
 
-                            {/* 2. Enquete */}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setShowAttachmentMenu(false);
-                                setShowPollModal(true);
-                              }}
-                              className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
-                            >
-                              <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
-                                <BarChart2 size={18} />
-                              </div>
-                              <div>
-                                <p className="text-xs font-black text-white leading-tight">Enquete de Votação</p>
-                                <p className="text-[9px] text-white/40">Votação com opções e fotos</p>
-                              </div>
-                            </button>
+                              {/* 2. Enquete */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setShowAttachmentMenu(false);
+                                  setShowPollModal(true);
+                                }}
+                                className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                              >
+                                <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+                                  <BarChart2 size={18} />
+                                </div>
+                                <div>
+                                  <p className="text-xs font-black text-white leading-tight">Enquete de Votação</p>
+                                  <p className="text-[9px] text-white/40">Votação com opções e fotos</p>
+                                </div>
+                              </button>
 
-                            {/* 3. Câmera */}
-                            <button
-                              type="button"
-                              onClick={() => handleNativeCameraClick(false)}
-                              className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
-                            >
-                              <div className="w-9 h-9 rounded-xl bg-pink-500/20 text-pink-400 border border-pink-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
-                                <Camera size={18} />
-                              </div>
-                              <div>
-                                <p className="text-xs font-black text-white leading-tight">Câmera</p>
-                                <p className="text-[9px] text-white/40">Tirar foto instantânea</p>
-                              </div>
-                            </button>
+                              {/* 3. Câmera */}
+                              <button
+                                type="button"
+                                onClick={() => handleNativeCameraClick(false)}
+                                className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                              >
+                                <div className="w-9 h-9 rounded-xl bg-pink-500/20 text-pink-400 border border-pink-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+                                  <Camera size={18} />
+                                </div>
+                                <div>
+                                  <p className="text-xs font-black text-white leading-tight">Câmera</p>
+                                  <p className="text-[9px] text-white/40">Tirar foto instantânea</p>
+                                </div>
+                              </button>
 
-                            {/* 4. Galeria */}
-                            <button
-                              type="button"
-                              onClick={() => handleNativeGalleryClick(false)}
-                              className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
-                            >
-                              <div className="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
-                                <ImageIcon size={18} />
-                              </div>
-                              <div>
-                                <p className="text-xs font-black text-white leading-tight">Galeria</p>
-                                <p className="text-[9px] text-white/40">Fotos do dispositivo</p>
-                              </div>
-                            </button>
-                          </motion.div>
+                              {/* 4. Galeria */}
+                              <button
+                                type="button"
+                                onClick={() => handleNativeGalleryClick(false)}
+                                className="flex items-center gap-3 p-2 rounded-2xl hover:bg-white/5 text-left transition-all group"
+                              >
+                                <div className="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center group-hover:scale-110 transition-transform">
+                                  <ImageIcon size={18} />
+                                </div>
+                                <div>
+                                  <p className="text-xs font-black text-white leading-tight">Galeria</p>
+                                  <p className="text-[9px] text-white/40">Fotos do dispositivo</p>
+                                </div>
+                              </button>
+                            </motion.div>
+                          </>
                         )}
                       </AnimatePresence>
                     </div>
@@ -4748,180 +5052,46 @@ export default function Messenger({
       </div>
 
       {/* =========================================================================
-          CALLING SUITE OVERLAYS (Daily.co)
+          CALLING SUITE OVERLAYS (Daily.co) - Premium Native Experience
           ========================================================================= */}
-      {callState !== 'idle' && callUser && (
-        <div className="absolute inset-0 bg-[#0a0e17]/95 backdrop-blur-md z-[999] flex flex-col items-center justify-between p-8 text-white">
-          
-          {/* 1. OUTGOING CALL VIEW */}
-          {callState === 'outgoing' && (
-            <div className="flex-1 flex flex-col items-center justify-center space-y-6 animate-fadeIn">
-              <div className="relative">
-                <div className="w-28 h-28 rounded-full border-4 border-[#d4af37]/40 p-1 animate-pulse">
-                  {callUser.avatar_url ? (
-                    <img src={callUser.avatar_url} className="w-full h-full object-cover rounded-full" alt="" />
-                  ) : (
-                    <div className="w-full h-full rounded-full bg-slate-800 flex items-center justify-center text-3xl font-black text-[#d4af37]">
-                      {callUser.full_name.charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="text-center">
-                <h2 className="text-xl font-black uppercase tracking-wider">{callUser.full_name}</h2>
-                <p className="text-xs text-[#d4af37] font-bold uppercase tracking-widest mt-1 animate-pulse">
-                  A ligar por {callType === 'video' ? 'vídeo' : 'voz'}...
-                </p>
-              </div>
-            </div>
-          )}
+      <AnimatePresence>
+        {callState === 'incoming' && callUser && (
+          <IncomingCallScreen
+            key="incoming-call-screen"
+            callerName={callUser.full_name}
+            callerAvatar={callUser.avatar_url}
+            callType={callType}
+            onAccept={acceptCall}
+            onDecline={declineCall}
+          />
+        )}
 
-          {/* 2. INCOMING CALL VIEW */}
-          {callState === 'incoming' && (
-            <div className="flex-1 flex flex-col items-center justify-center space-y-6 animate-fadeIn">
-              <div className="relative">
-                <div className="w-28 h-28 rounded-full border-4 border-[#00a884]/40 p-1 animate-pulse">
-                  {callUser.avatar_url ? (
-                    <img src={callUser.avatar_url} className="w-full h-full object-cover rounded-full" alt="" />
-                  ) : (
-                    <div className="w-full h-full rounded-full bg-slate-800 flex items-center justify-center text-3xl font-black text-[#00a884]">
-                      {callUser.full_name.charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="text-center">
-                <h2 className="text-xl font-black uppercase tracking-wider">{callUser.full_name}</h2>
-                <p className="text-xs text-[#00a884] font-bold uppercase tracking-widest mt-1 animate-pulse">
-                  A receber chamada de {callType === 'video' ? 'vídeo' : 'voz'}...
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* 3. CONNECTED CALL VIEW */}
-          {callState === 'connected' && (
-            <div className="flex-1 w-full h-full relative flex flex-col items-center justify-center animate-fadeIn">
-              {/* Dedicated audio element ensuring continuous audio output on mobile devices without WebKit pausing */}
-              <audio 
-                ref={remoteAudioRef} 
-                autoPlay 
-                playsInline 
-                style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: '1px', height: '1px' }} 
-              />
-
-              {/* Remote media element for video rendering */}
-              <video 
-                ref={remoteVideoRef} 
-                autoPlay 
-                playsInline 
-                className={callType === 'video' ? "w-full h-full object-cover rounded-3xl" : "hidden"}
-              />
-
-              {callType === 'video' ? (
-                /* Picture-in-picture local preview for video calls */
-                !isCallCameraOff && (
-                  <div className="absolute top-4 right-4 w-28 h-40 rounded-2xl overflow-hidden border-2 border-white/25 shadow-lg bg-slate-900 z-50">
-                    <video 
-                      ref={localVideoRef} 
-                      autoPlay 
-                      playsInline 
-                      muted 
-                      className="w-full h-full object-cover scale-x-[-1]"
-                    />
-                  </div>
-                )
-              ) : (
-                /* Voice call layout */
-                <div className="flex flex-col items-center justify-center space-y-6">
-                  {/* Keep local stream active and assigned */}
-                  <video 
-                    ref={localVideoRef} 
-                    autoPlay 
-                    playsInline 
-                    muted 
-                    style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: '1px', height: '1px' }} 
-                  />
-
-                  <div className="relative">
-                    <div className="w-32 h-32 rounded-full border-4 border-[#0084ff]/30 p-1 animate-pulse">
-                      {callUser.avatar_url ? (
-                        <img src={callUser.avatar_url} className="w-full h-full object-cover rounded-full" alt="" />
-                      ) : (
-                        <div className="w-full h-full rounded-full bg-slate-800 flex items-center justify-center text-4xl font-black text-[#0084ff]">
-                          {callUser.full_name.charAt(0).toUpperCase()}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="text-center">
-                    <h2 className="text-xl font-black uppercase tracking-wider">{callUser.full_name}</h2>
-                    <p className="text-xs text-green-400 font-bold uppercase tracking-widest mt-1 flex items-center justify-center gap-1.5 animate-pulse">
-                      <span className="w-2 h-2 rounded-full bg-green-400 inline-block animate-ping" />
-                      Chamada de Voz Ativa
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 4. FLOATING CONTROL PANEL */}
-          <div className="w-full flex items-center justify-center gap-6 py-4">
-            {callState === 'incoming' ? (
-              /* Accept / Decline triggers for incoming */
-              <div className="flex items-center gap-8">
-                <button 
-                  onClick={declineCall}
-                  className="w-14 h-14 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center shadow-lg active:scale-95 transition-all text-white"
-                  title="Recusar"
-                >
-                  <PhoneOff size={24} />
-                </button>
-                <button 
-                  onClick={acceptCall}
-                  className="w-14 h-14 bg-green-600 hover:bg-green-700 rounded-full flex items-center justify-center shadow-lg active:scale-95 transition-all text-white animate-bounce"
-                  title="Aceitar"
-                >
-                  <Phone size={24} />
-                </button>
-              </div>
-            ) : (
-              /* Active controls for connected / outgoing */
-              <div className="flex items-center gap-5">
-                {callState === 'connected' && (
-                  <button 
-                    onClick={toggleCallMute}
-                    className={`w-12 h-12 rounded-full flex items-center justify-center shadow transition-all active:scale-95 ${isCallMuted ? 'bg-red-500/20 border border-red-500 text-red-500' : 'bg-white/10 hover:bg-white/20 text-white'}`}
-                    title={isCallMuted ? 'Ativar microfone' : 'Mudar microfone'}
-                  >
-                    {isCallMuted ? <MicOff size={20} /> : <Mic size={20} />}
-                  </button>
-                )}
-
-                {callState === 'connected' && callType === 'video' && (
-                  <button 
-                    onClick={toggleCallCamera}
-                    className={`w-12 h-12 rounded-full flex items-center justify-center shadow transition-all active:scale-95 ${isCallCameraOff ? 'bg-red-500/20 border border-red-500 text-red-500' : 'bg-white/10 hover:bg-white/20 text-white'}`}
-                    title={isCallCameraOff ? 'Ligar câmara' : 'Desligar câmara'}
-                  >
-                    {isCallCameraOff ? <VideoOff size={20} /> : <Video size={20} />}
-                  </button>
-                )}
-
-                <button 
-                  onClick={() => handleHangUpLocal(true)}
-                  className="w-14 h-14 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center shadow-lg active:scale-95 transition-all text-white"
-                  title="Desligar"
-                >
-                  <PhoneOff size={24} />
-                </button>
-              </div>
-            )}
-          </div>
-
-        </div>
-      )}
+        {(callState === 'outgoing' || callState === 'connected' || callState === 'reconnecting' || callState === 'ended') && callUser && (
+          <ActiveCallScreen
+            key="active-call-screen"
+            status={callState as CallStatusType}
+            callType={callType}
+            partnerName={callUser.full_name}
+            partnerAvatar={callUser.avatar_url}
+            localVideoRef={localVideoRef}
+            remoteVideoRef={remoteVideoRef}
+            remoteAudioRef={remoteAudioRef}
+            isMuted={isCallMuted}
+            isCameraOff={isCallCameraOff}
+            isSpeakerOn={isSpeakerOn}
+            isRemoteCameraOff={isRemoteCameraOff}
+            durationSeconds={callDurationSec}
+            onToggleMute={toggleCallMute}
+            onToggleCamera={toggleCallCamera}
+            onFlipCamera={flipCallCamera}
+            onToggleSpeaker={toggleSpeaker}
+            onHangUp={() => handleHangUpLocal(true)}
+            onMinimize={() => {
+              showGlobalToast('Chamada ativa mantida', 'info');
+            }}
+          />
+        )}
+      </AnimatePresence>
 
       {/* 5. WHATSAPP-STYLE DELETE MESSAGE MODAL */}
       {isDeleteModalOpen && messageToDelete && (
@@ -5322,6 +5492,150 @@ export default function Messenger({
                   <span>Criar Enquete</span>
                 </button>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 10. MODAL SELETOR DE TEMAS DO CHAT (MESSENGER) */}
+      <AnimatePresence>
+        {showThemeModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/80 backdrop-blur-md"
+            onClick={() => setShowThemeModal(false)}
+          >
+            <motion.div
+              initial={{ y: '100%', opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: '100%', opacity: 0 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md bg-[#1c2431] border-t sm:border border-white/10 rounded-t-[2.5rem] sm:rounded-3xl p-6 space-y-5 shadow-2xl text-white max-h-[85vh] overflow-y-auto"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-white/10 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-[#d4af37]/20 border border-[#d4af37]/40 flex items-center justify-center text-[#d4af37]">
+                    <Palette size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-white uppercase tracking-wider">
+                      Tema das Conversas
+                    </h3>
+                    <p className="text-[10px] text-white/50 font-medium">
+                      Personalize as cores e estilo do chat
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  type="button"
+                  onClick={() => setShowThemeModal(false)} 
+                  className="p-2 text-white/40 hover:text-white rounded-xl hover:bg-white/5 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Theme Options Grid */}
+              <div className="space-y-3">
+                {(Object.keys(CHAT_THEMES) as ChatThemeId[]).map((themeKey) => {
+                  const t = CHAT_THEMES[themeKey];
+                  const isSelected = chatThemeId === themeKey;
+
+                  return (
+                    <button
+                      key={themeKey}
+                      type="button"
+                      onClick={() => handleSelectTheme(themeKey)}
+                      className={`
+                        w-full p-4 rounded-2xl border text-left transition-all flex items-center justify-between gap-3 active:scale-[0.98]
+                        ${isSelected 
+                          ? 'bg-[#d4af37]/10 border-[#d4af37] shadow-lg shadow-[#d4af37]/10' 
+                          : 'bg-[#0a0e17]/60 border-white/5 hover:border-white/20 hover:bg-white/5'
+                        }
+                      `}
+                    >
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        {/* Color Preview Swatch */}
+                        <div 
+                          className="w-10 h-10 rounded-xl flex items-center justify-center border border-white/20 shadow flex-shrink-0"
+                          style={{ backgroundColor: t.previewColor }}
+                        >
+                          <div className="w-3 h-3 rounded-full bg-white/80 shadow-sm" />
+                        </div>
+
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-black text-white uppercase tracking-wider truncate">
+                              {t.name}
+                            </span>
+                            <span 
+                              className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-wider ${
+                                isSelected 
+                                  ? 'bg-[#d4af37] text-black' 
+                                  : 'bg-white/10 text-white/60'
+                              }`}
+                            >
+                              {t.badge}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-white/60 truncate mt-0.5">
+                            {t.description}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Selection Radio Indicator */}
+                      <div className={`
+                        w-6 h-6 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all
+                        ${isSelected 
+                          ? 'border-[#d4af37] bg-[#d4af37] text-black' 
+                          : 'border-white/20 bg-transparent'
+                        }
+                      `}>
+                        {isSelected && <Check size={14} className="stroke-[3]" />}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Live Preview Sample */}
+              <div className="p-4 rounded-2xl bg-[#0a0e17] border border-white/10 space-y-2">
+                <p className="text-[9px] font-black uppercase tracking-widest text-white/40">
+                  Pré-visualização do tema e papel de parede:
+                </p>
+                <div className={`p-4 rounded-xl ${currentTheme.containerBg} flex flex-col gap-2.5 border border-white/10 relative overflow-hidden`}>
+                  {/* Pattern Preview */}
+                  <div 
+                    className="absolute inset-0 pointer-events-none transition-opacity"
+                    style={{
+                      opacity: currentTheme.patternOpacity,
+                      backgroundImage: `url("${currentTheme.patternUrl}")`,
+                      backgroundSize: '240px',
+                      backgroundRepeat: 'repeat'
+                    }}
+                  />
+                  <div className={`self-start max-w-[85%] px-3.5 py-2 rounded-2xl text-[11px] ${currentTheme.bubbleOtherBg} ${currentTheme.bubbleOtherText} border ${currentTheme.bubbleOtherBorder} shadow-sm relative z-10`}>
+                    Olá equipa! Bom trabalho hoje 👷‍♂️
+                  </div>
+                  <div className={`self-end max-w-[85%] px-3.5 py-2 rounded-2xl text-[11px] ${currentTheme.bubbleMyBg} ${currentTheme.bubbleMyText} border ${currentTheme.bubbleMyBorder} shadow-sm font-semibold relative z-10`}>
+                    Ponto marcado e obra em dia! 🚀
+                  </div>
+                </div>
+              </div>
+
+              {/* Close Button */}
+              <button
+                type="button"
+                onClick={() => setShowThemeModal(false)}
+                className="w-full py-3.5 bg-[#d4af37] hover:bg-[#c49f27] text-black font-black uppercase text-xs tracking-wider rounded-2xl shadow-lg transition-all active:scale-[0.98]"
+              >
+                Concluir & Aplicar
+              </button>
             </motion.div>
           </motion.div>
         )}

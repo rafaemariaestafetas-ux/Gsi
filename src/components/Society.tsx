@@ -4,7 +4,7 @@ import { Profile, TimeEntry } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { User, Clock, HardHat, Phone, Calendar, Search, Plus, Star, Briefcase, Home, MapPin, Users, MessageSquare } from 'lucide-react';
 import { getGamificationStats } from '../lib/gamification';
-import GroupChat from './GroupChat';
+import Messenger from './Messenger';
 
 export default function Society({ 
   isDarkMode = true, 
@@ -12,14 +12,16 @@ export default function Society({
   currentUserId = '',
   userName = '',
   userAvatar = '',
-  onToggleImmersive
+  onToggleImmersive,
+  onOpenMessenger
 }: { 
   isDarkMode?: boolean,
   onlineUsers?: Map<string, any>,
   currentUserId?: string,
   userName?: string,
   userAvatar?: string,
-  onToggleImmersive?: (isOpen: boolean) => void
+  onToggleImmersive?: (isOpen: boolean) => void,
+  onOpenMessenger?: (tab?: 'direct' | 'groups', userId?: string) => void
 }) {
   const [activeTab, setActiveTab] = useState<'team' | 'groups'>('team');
   const [profiles, setProfiles] = useState<(Profile & { stats?: any, todayEntry?: TimeEntry })[]>([]);
@@ -215,14 +217,17 @@ export default function Society({
               initial={{ opacity: 0, x: 10 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 10 }}
-              className="h-full"
+              className="h-full min-h-[580px]"
             >
-              <GroupChat 
+              <Messenger 
+                isOpen={true}
+                embedded={true}
+                initialTab="groups"
                 currentUserId={currentUserId} 
                 userName={userName} 
                 userAvatar={userAvatar}
-                isDarkMode={isDarkMode} 
-                onToggleImmersive={onToggleImmersive}
+                onlineUsers={onlineUsers}
+                onClose={() => setActiveTab('team')}
               />
             </motion.div>
           )}
@@ -307,6 +312,24 @@ export default function Society({
                     </div>
                   </div>
                 </div>
+
+                {/* Send Message Button */}
+                {selectedProfile.id !== currentUserId && (
+                  <button
+                    onClick={() => {
+                      const pid = selectedProfile.id;
+                      setSelectedProfile(null);
+                      if (onOpenMessenger) {
+                        onOpenMessenger('direct', pid);
+                      } else {
+                        setActiveTab('groups');
+                      }
+                    }}
+                    className="w-full py-3.5 bg-[#d4af37] text-black font-black text-xs uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 hover:bg-[#e5c158] active:scale-98 transition-all shadow-lg shadow-[#d4af37]/20"
+                  >
+                    <MessageSquare size={16} /> Enviar Mensagem no Chat
+                  </button>
+                )}
 
                 {/* Activity List Section */}
                 <div className="space-y-4">

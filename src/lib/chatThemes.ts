@@ -1,3 +1,5 @@
+import { CHAT_WALLPAPERS } from './chatWallpapers';
+
 export type ChatThemeId = 'classic' | 'dark-premium' | 'industrial' | 'night-soft';
 
 export interface ChatTheme {
@@ -76,8 +78,8 @@ export const CHAT_THEMES: Record<ChatThemeId, ChatTheme> = {
     badge: 'LUXO',
     previewColor: '#d4af37',
     containerBg: 'bg-[#0a0e17]',
-    patternOpacity: 0.08,
-    patternUrl: 'https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png',
+    patternOpacity: 0.15,
+    patternUrl: CHAT_WALLPAPERS['dark-premium'],
     bubbleMyBg: 'bg-gradient-to-r from-[#d4af37] to-[#e5c04b]',
     bubbleMyText: 'text-black font-semibold',
     bubbleMyBorder: 'border-[#f5df7a]/50',
@@ -107,8 +109,8 @@ export const CHAT_THEMES: Record<ChatThemeId, ChatTheme> = {
     badge: 'OBRA',
     previewColor: '#64748b',
     containerBg: 'bg-[#181c24]',
-    patternOpacity: 0.12,
-    patternUrl: 'https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png',
+    patternOpacity: 0.18,
+    patternUrl: CHAT_WALLPAPERS.industrial,
     bubbleMyBg: 'bg-[#334155]',
     bubbleMyText: 'text-amber-100',
     bubbleMyBorder: 'border-amber-400/30',
@@ -138,8 +140,8 @@ export const CHAT_THEMES: Record<ChatThemeId, ChatTheme> = {
     badge: 'RELAX',
     previewColor: '#38bdf8',
     containerBg: 'bg-[#0b1329]',
-    patternOpacity: 0.1,
-    patternUrl: 'https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png',
+    patternOpacity: 0.16,
+    patternUrl: CHAT_WALLPAPERS['night-soft'],
     bubbleMyBg: 'bg-[#1e3a8a]',
     bubbleMyText: 'text-cyan-50',
     bubbleMyBorder: 'border-cyan-400/30',

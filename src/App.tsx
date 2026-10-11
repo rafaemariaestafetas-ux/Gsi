@@ -15,9 +15,12 @@ import ReelsView from './components/ReelsView';
 import Messenger from './components/Messenger';
 import FCMPushModal from './components/FCMPushModal';
 import AppUpdateModal from './components/AppUpdateModal';
+import Onboarding, { ONBOARDING_STORAGE_KEY } from './components/Onboarding';
+import IncomingCallScreen from './components/IncomingCallScreen';
 import { checkForAppUpdate, ReleaseInfo } from './services/appUpdateService';
 import { 
-  setupForegroundMessageListener, 
+  setupNativePushNotifications,
+  setupForegroundMessageListener,
   requestNativeNotificationPermission, 
   initializePushNotifications, 
   configureAndroidNotificationChannel,
@@ -41,7 +44,6 @@ import {
   Sun, 
   Moon, 
   Zap, 
-  Bell, 
   Film, 
   TrendingUp, 
   MessageCircle, 
@@ -63,9 +65,13 @@ import { SplashScreen } from '@capacitor/splash-screen';
 import { triggerLightHaptic, triggerMediumHaptic, triggerSuccessHaptic, triggerWarningHaptic } from './lib/haptics';
 import { getCurrentLocation } from './lib/locationService';
 import { useToast } from './lib/ToastContext';
+import NetworkStatusBar from './components/NetworkStatusBar';
+import { initNetworkService, useNetworkStatus, isOnline } from './services/networkService';
+import { initOfflineSync, addToQueue, processQueue, getPendingItems } from './services/offlineSyncService';
 
 export default function App() {
   const { showSuccess, showError, showWarning, showInfo } = useToast();
+  const { isOnline: isDeviceOnline } = useNetworkStatus();
   const [session, setSession] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'home' | 'ponto' | 'society' | 'alerts' | 'profile'>('home');
   const [entries, setEntries] = useState<TimeEntry[]>([]);
@@ -97,6 +103,23 @@ export default function App() {
   const [updateRelease, setUpdateRelease] = useState<ReleaseInfo | null>(null);
   const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
+
+  // Monitor first open after login for Onboarding
+  useEffect(() => {
+    if (session && !localStorage.getItem(ONBOARDING_STORAGE_KEY)) {
+      setShowOnboarding(true);
+    }
+
+    const handleReplayOnboarding = () => {
+      setShowOnboarding(true);
+    };
+
+    window.addEventListener('gsi:open_onboarding', handleReplayOnboarding);
+    return () => {
+      window.removeEventListener('gsi:open_onboarding', handleReplayOnboarding);
+    };
+  }, [session]);
 
   // Check for app updates on launch from GitHub Releases (apenas Android nativo)
   useEffect(() => {
@@ -131,38 +154,31 @@ export default function App() {
     };
   }, []);
 
-  // Request native Android notification permission as soon as the app opens (like GPS location)
+  // Silent notification channel and existing permission check on launch (never prompts user automatically)
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
 
     let isMounted = true;
-    const initNativeNotifications = async () => {
+    const checkNotificationStatus = async () => {
       try {
         await configureAndroidNotificationChannel();
         const granted = await checkNativeNotificationPermission();
         if (isMounted && granted) {
           setNotificationsEnabled(true);
           setFcmRegistered(true);
-        }
-
-        // Trigger native notification permission prompt on launch
-        const token = await requestNativeNotificationPermission(session?.user?.id);
-        if (isMounted && token) {
-          setNotificationsEnabled(true);
-          setFcmRegistered(true);
+          // If already granted, register device silently without any user prompt
+          await initializePushNotifications();
         }
       } catch (err) {
-        console.warn('[App] Native notification startup note:', err);
+        console.warn('[App] Silent notification check note:', err);
       }
     };
 
-    // Small 800ms timer to ensure activity has finished initial render
-    const timer = setTimeout(initNativeNotifications, 800);
+    checkNotificationStatus();
     return () => {
       isMounted = false;
-      clearTimeout(timer);
     };
-  }, [session?.user?.id]);
+  }, []);
 
   // Native Android Capacitor Lifecycle (Back button & Status Bar)
   useEffect(() => {
@@ -176,6 +192,9 @@ export default function App() {
         if (incomingCallBanner) {
           stopIncomingCallRingtone();
           setIncomingCallBanner(null);
+        } else if (showOnboarding) {
+          setShowOnboarding(false);
+          localStorage.setItem(ONBOARDING_STORAGE_KEY, 'true');
         } else if (isUpdateModalOpen) {
           setIsUpdateModalOpen(false);
         } else if (isMessengerOpen) {
@@ -197,15 +216,15 @@ export default function App() {
         if (removeListener) removeListener();
       };
     }
-  }, [incomingCallBanner, isUpdateModalOpen, isMessengerOpen, isFCMModalOpen, activeTab]);
+  }, [incomingCallBanner, showOnboarding, isUpdateModalOpen, isMessengerOpen, isFCMModalOpen, activeTab]);
 
-  // Native Push Notifications event listeners (Capacitor Android)
+  // Unified Native Push Notifications listener registration (Capacitor Android)
   useEffect(() => {
-    if (Capacitor.isNativePlatform()) {
-      let receiveHandle: any = null;
-      let actionHandle: any = null;
+    if (!Capacitor.isNativePlatform()) return;
 
-      PushNotifications.addListener('pushNotificationReceived', (notification) => {
+    setupNativePushNotifications({
+      userId: session?.user?.id,
+      onNotificationReceived: (notification) => {
         console.log('[Native Push] Recebida em primeiro plano:', notification);
         const data = notification.data || {};
         if (data.type === 'call') {
@@ -231,9 +250,8 @@ export default function App() {
             content: data.body || notification.body || 'Nova mensagem'
           });
         }
-      }).then(h => { receiveHandle = h; }).catch(() => {});
-
-      PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+      },
+      onNotificationActionPerformed: (action) => {
         console.log('[Native Push] Notificação clicada:', action);
         const data = action.notification.data || {};
         if (data.type === 'call') {
@@ -252,14 +270,9 @@ export default function App() {
         } else if (data.type === 'message' || data.type === 'private_message' || data.type === 'group_message') {
           setIsMessengerOpen(true);
         }
-      }).then(h => { actionHandle = h; }).catch(() => {});
-
-      return () => {
-        if (receiveHandle?.remove) receiveHandle.remove();
-        if (actionHandle?.remove) actionHandle.remove();
-      };
-    }
-  }, []);
+      }
+    });
+  }, [session?.user?.id]);
 
   // Global calling listener: plays loud ringtone, vibrates phone and displays call modal
   useEffect(() => {
@@ -429,6 +442,8 @@ export default function App() {
   const handleAbsence = async (reason: string) => {
     if (!session) return;
     const today = new Date();
+    const isOfflineNow = !isOnline();
+
     const newEntry: TimeEntry = {
       day: today.getDate(),
       month: today.getMonth(),
@@ -436,7 +451,10 @@ export default function App() {
       hours: '00:00',
       obra: 'FALTA',
       description: reason.toUpperCase(),
-      user_id: session.user.id
+      user_id: session.user.id,
+      is_absence: true,
+      absence_reason: reason,
+      sync_status: isOfflineNow ? 'pending_sync' : 'synced'
     };
 
     setEntries(prev => {
@@ -445,6 +463,12 @@ export default function App() {
       localStorage.setItem(`entries_${selectedMonth}_${selectedYear}`, JSON.stringify(updated));
       return updated;
     });
+
+    if (isOfflineNow) {
+      addToQueue('time_entry', newEntry);
+      showInfo('Ponto guardado offline. Vai sincronizar quando houver rede.', 'PONTO OFFLINE');
+      return;
+    }
 
     try {
       await supabase
@@ -455,15 +479,43 @@ export default function App() {
         .eq('year', today.getFullYear())
         .eq('user_id', session.user.id);
 
-      await supabase.from('time_entries').insert([newEntry]);
+      const { error } = await supabase.from('time_entries').insert([{
+        day: today.getDate(),
+        month: today.getMonth(),
+        year: today.getFullYear(),
+        hours: '00:00',
+        obra: 'FALTA',
+        description: reason.toUpperCase(),
+        user_id: session.user.id,
+        is_absence: true,
+        absence_reason: reason
+      }]);
+      if (error) throw error;
       showSuccess(`Falta do dia ${today.getDate()} justificada com sucesso!`, 'AUSÊNCIA REGISTADA');
       fetchEntries();
     } catch (err) {
-      showError('Erro ao registar a falta. Tente novamente.');
+      console.warn('[App] Supabase offline fallback for absence:', err);
+      newEntry.sync_status = 'pending_sync';
+      setEntries(prev => {
+        const filtered = prev.filter(e => e.day !== today.getDate());
+        const updated = [...filtered, newEntry].sort((a, b) => a.day - b.day);
+        localStorage.setItem(`entries_${selectedMonth}_${selectedYear}`, JSON.stringify(updated));
+        return updated;
+      });
+      addToQueue('time_entry', newEntry);
+      showInfo('Ponto guardado offline. Vai sincronizar quando houver rede.', 'PONTO OFFLINE');
     }
   };
 
   useEffect(() => {
+    initNetworkService();
+    initOfflineSync();
+
+    const handleOfflineSyncFinished = () => {
+      fetchEntries();
+    };
+    window.addEventListener('gsi:offline_sync_completed', handleOfflineSyncFinished);
+
     const hideSplash = () => {
       if (Capacitor.isNativePlatform()) {
         SplashScreen.hide({ fadeOutDuration: 400 }).catch(() => {});
@@ -511,6 +563,7 @@ export default function App() {
       isMounted = false;
       clearTimeout(safetyTimer);
       subscription.unsubscribe();
+      window.removeEventListener('gsi:offline_sync_completed', handleOfflineSyncFinished);
     };
   }, []);
 
@@ -627,6 +680,7 @@ export default function App() {
     if (!session) return;
 
     const currentWorkSite = profile?.current_obra || obra || 'OBRA NÃO DEFINIDA';
+    const isOfflineNow = !isOnline();
 
     const newEntry: TimeEntry = {
       day,
@@ -635,7 +689,8 @@ export default function App() {
       hours,
       obra: currentWorkSite.toUpperCase(),
       description: userRole.toUpperCase(),
-      user_id: session.user.id
+      user_id: session.user.id,
+      sync_status: isOfflineNow ? 'pending_sync' : 'synced'
     };
 
     setEntries(prev => {
@@ -644,6 +699,14 @@ export default function App() {
       localStorage.setItem(`entries_${selectedMonth}_${selectedYear}`, JSON.stringify(updated));
       return updated;
     });
+
+    if (isOfflineNow) {
+      addToQueue('time_entry', newEntry);
+      setHours('');
+      setObra('');
+      showInfo('Ponto guardado offline. Vai sincronizar quando houver rede.', 'PONTO OFFLINE');
+      return;
+    }
 
     try {
       await supabase
@@ -654,14 +717,34 @@ export default function App() {
         .eq('year', selectedYear)
         .eq('user_id', session.user.id);
 
-      await supabase.from('time_entries').insert([newEntry]);
+      const { error } = await supabase.from('time_entries').insert([{
+        day,
+        month: selectedMonth,
+        year: selectedYear,
+        hours,
+        obra: currentWorkSite.toUpperCase(),
+        description: userRole.toUpperCase(),
+        user_id: session.user.id
+      }]);
+      if (error) throw error;
       
       setHours('');
       setObra('');
       showSuccess(`Ponto registado para o dia ${day}: ${hours}h na obra ${obra || 'padrão'}!`, 'PONTO REGISTADO');
       fetchEntries();
     } catch (err) {
-      showError('Erro ao sincronizar ponto com o servidor.');
+      console.warn('[App] Supabase offline fallback for add entry:', err);
+      newEntry.sync_status = 'pending_sync';
+      setEntries(prev => {
+        const filtered = prev.filter(e => e.day !== day);
+        const updated = [...filtered, newEntry].sort((a, b) => a.day - b.day);
+        localStorage.setItem(`entries_${selectedMonth}_${selectedYear}`, JSON.stringify(updated));
+        return updated;
+      });
+      addToQueue('time_entry', newEntry);
+      setHours('');
+      setObra('');
+      showInfo('Ponto guardado offline. Vai sincronizar quando houver rede.', 'PONTO OFFLINE');
     }
   };
 
@@ -670,6 +753,7 @@ export default function App() {
     await triggerSuccessHaptic();
     const today = new Date();
     const currentWorkSite = profile?.current_obra || obra || 'OBRA NÃO DEFINIDA';
+    const isOfflineNow = !isOnline();
     
     const newEntry: TimeEntry = {
       day: today.getDate(),
@@ -678,7 +762,8 @@ export default function App() {
       hours: `${quickHours.toString().padStart(2, '0')}:00`,
       obra: currentWorkSite.toUpperCase(),
       description: userRole.toUpperCase(),
-      user_id: session.user.id
+      user_id: session.user.id,
+      sync_status: isOfflineNow ? 'pending_sync' : 'synced'
     };
 
     setEntries(prev => {
@@ -687,6 +772,12 @@ export default function App() {
       localStorage.setItem(`entries_${selectedMonth}_${selectedYear}`, JSON.stringify(updated));
       return updated;
     });
+
+    if (isOfflineNow) {
+      addToQueue('time_entry', newEntry);
+      showInfo('Ponto guardado offline. Vai sincronizar quando houver rede.', 'PONTO OFFLINE');
+      return;
+    }
 
     try {
       await supabase
@@ -697,11 +788,29 @@ export default function App() {
         .eq('year', today.getFullYear())
         .eq('user_id', session.user.id);
 
-      await supabase.from('time_entries').insert([newEntry]);
+      const { error } = await supabase.from('time_entries').insert([{
+        day: today.getDate(),
+        month: today.getMonth(),
+        year: today.getFullYear(),
+        hours: `${quickHours.toString().padStart(2, '0')}:00`,
+        obra: currentWorkSite.toUpperCase(),
+        description: userRole.toUpperCase(),
+        user_id: session.user.id
+      }]);
+      if (error) throw error;
       showSuccess(`Ponto de hoje (${quickHours}h) registado com sucesso!`, 'PONTO REGISTADO');
       fetchEntries();
     } catch (err) {
-      showError('Erro de sincronia com a base de dados.');
+      console.warn('[App] Supabase offline fallback for quick mark:', err);
+      newEntry.sync_status = 'pending_sync';
+      setEntries(prev => {
+        const filtered = prev.filter(e => e.day !== today.getDate());
+        const updated = [...filtered, newEntry].sort((a, b) => a.day - b.day);
+        localStorage.setItem(`entries_${selectedMonth}_${selectedYear}`, JSON.stringify(updated));
+        return updated;
+      });
+      addToQueue('time_entry', newEntry);
+      showInfo('Ponto guardado offline. Vai sincronizar quando houver rede.', 'PONTO OFFLINE');
     }
   };
 
@@ -781,6 +890,9 @@ export default function App() {
         paddingBottom: 'calc(5.75rem + env(safe-area-inset-bottom, 0px))'
       }}
     >
+      {/* Network Status Offline/Syncing Banner */}
+      <NetworkStatusBar />
+
       {/* Background radial glow */}
       <div className="fixed inset-0 pointer-events-none">
         <div className="absolute top-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-900/20 blur-[120px] rounded-full" />
@@ -805,16 +917,6 @@ export default function App() {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            <button 
-              onClick={() => setIsFCMModalOpen(true)}
-              className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center bg-white/5 hover:bg-[#d4af37]/15 transition-all relative group"
-              title="Alertas de Ponto Push (Firebase FCM)"
-            >
-              <Bell size={18} className="text-[#d4af37] group-hover:scale-110 transition-transform" />
-              {fcmRegistered && (
-                <div className="absolute top-1 right-1 w-2.5 h-2.5 bg-green-500 rounded-full border border-[#0a0e17]" />
-              )}
-            </button>
             <button 
               onClick={() => {
                 setIsMessengerOpen(true);
@@ -952,6 +1054,14 @@ export default function App() {
                 onAbsence={handleAbsence}
                 isDarkMode={true} 
                 hasMarkedToday={hasMarkedToday}
+                todayEntry={entries.find(e => 
+                  e.day === today.getDate() && 
+                  e.month === today.getMonth() && 
+                  e.year === today.getFullYear()
+                ) || null}
+                isOffline={!isDeviceOnline}
+                pendingSyncCount={getPendingItems('time_entry').length}
+                onSyncNow={() => processQueue()}
               />
             </motion.div>
           )}
@@ -970,6 +1080,9 @@ export default function App() {
                 userName={userName}
                 userAvatar={profile?.avatar_url}
                 onToggleImmersive={(open) => setIsImmersive(open)}
+                onOpenMessenger={() => {
+                  setIsMessengerOpen(true);
+                }}
               />
             </motion.div>
           )}
@@ -1095,80 +1208,33 @@ export default function App() {
       {/* Incoming Call Overlay Modal */}
       <AnimatePresence>
         {incomingCallBanner && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-            className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/90 backdrop-blur-xl"
-          >
-            <div className="w-full max-w-sm bg-[#1c2431] border border-white/10 rounded-[3rem] p-8 text-center space-y-6 shadow-2xl relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 via-[#d4af37] to-emerald-500 animate-pulse" />
-
-              <div className="relative mx-auto w-28 h-28">
-                <div className="absolute inset-0 rounded-full bg-emerald-500/20 animate-ping" />
-                <div className="w-28 h-28 rounded-full border-4 border-emerald-400 overflow-hidden bg-black/60 shadow-xl relative z-10 flex items-center justify-center">
-                  {incomingCallBanner.senderAvatar ? (
-                    <img src={incomingCallBanner.senderAvatar} className="w-full h-full object-cover" />
-                  ) : (
-                    <span className="text-3xl font-black text-white">
-                      {(incomingCallBanner.senderName || 'U').charAt(0).toUpperCase()}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <h3 className="text-xl font-black text-white tracking-wide">
-                  {incomingCallBanner.senderName || 'Colega de Obra'}
-                </h3>
-                <p className="text-xs font-bold text-emerald-400 uppercase tracking-widest flex items-center justify-center gap-1.5 animate-pulse">
-                  <PhoneCall size={14} />
-                  Chamada de {incomingCallBanner.callType === 'video' ? 'Vídeo' : 'Voz'} a receber...
-                </p>
-              </div>
-
-              {/* Action Buttons: Atender / Recusar */}
-              <div className="flex items-center justify-center gap-6 pt-2">
-                {/* Recusar (Decline) */}
-                <button
-                  onClick={() => {
-                    triggerWarningHaptic();
-                    stopIncomingCallRingtone();
-                    if (incomingCallBanner?.senderId) {
-                      const ch = supabase.channel(`call-signals-${incomingCallBanner.senderId}`);
-                      ch.subscribe((st) => {
-                        if (st === 'SUBSCRIBED') {
-                          ch.send({ type: 'broadcast', event: 'signal', payload: { type: 'call-declined', senderId: session?.user?.id } });
-                          setTimeout(() => supabase.removeChannel(ch), 500);
-                        }
-                      });
-                    }
-                    setIncomingCallBanner(null);
-                    setIncomingCallSignal(null);
-                  }}
-                  className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-lg shadow-red-500/40 hover:scale-105 active:scale-95 transition-all"
-                  title="Recusar"
-                >
-                  <PhoneOff size={28} />
-                </button>
-
-                {/* Atender (Answer) */}
-                <button
-                  onClick={() => {
-                    triggerSuccessHaptic();
-                    stopIncomingCallRingtone();
-                    setIncomingCallSignal({ ...incomingCallBanner, autoAccept: true });
-                    setIncomingCallBanner(null);
-                    setIsMessengerOpen(true);
-                  }}
-                  className="w-20 h-20 rounded-full bg-emerald-500 hover:bg-emerald-400 text-black flex items-center justify-center shadow-xl shadow-emerald-500/50 hover:scale-105 active:scale-95 transition-all animate-bounce"
-                  title="Atender"
-                >
-                  <Phone size={34} className="fill-black" />
-                </button>
-              </div>
-            </div>
-          </motion.div>
+          <IncomingCallScreen
+            callerName={incomingCallBanner.senderName || 'Colega de Obra'}
+            callerAvatar={incomingCallBanner.senderAvatar}
+            callType={incomingCallBanner.callType === 'video' ? 'video' : 'audio'}
+            onAccept={() => {
+              triggerSuccessHaptic();
+              stopIncomingCallRingtone();
+              setIncomingCallSignal({ ...incomingCallBanner, autoAccept: true });
+              setIncomingCallBanner(null);
+              setIsMessengerOpen(true);
+            }}
+            onDecline={() => {
+              triggerWarningHaptic();
+              stopIncomingCallRingtone();
+              if (incomingCallBanner?.senderId) {
+                const ch = supabase.channel(`call-signals-${incomingCallBanner.senderId}`);
+                ch.subscribe((st) => {
+                  if (st === 'SUBSCRIBED') {
+                    ch.send({ type: 'broadcast', event: 'signal', payload: { type: 'call-declined', senderId: session?.user?.id } });
+                    setTimeout(() => supabase.removeChannel(ch), 500);
+                  }
+                });
+              }
+              setIncomingCallBanner(null);
+              setIncomingCallSignal(null);
+            }}
+          />
         )}
       </AnimatePresence>
 
@@ -1243,7 +1309,29 @@ export default function App() {
         />
       )}
 
+      {/* Onboarding Tutorial Modal na primeira abertura */}
       <AnimatePresence>
+        {showOnboarding && session && (
+          <Onboarding
+            onComplete={() => setShowOnboarding(false)}
+            userId={session?.user?.id}
+            onRequestNotifications={async () => {
+              try {
+                if (!Capacitor.isNativePlatform()) return true;
+                const token = await requestNativeNotificationPermission(session?.user?.id);
+                if (token) {
+                  setNotificationsEnabled(true);
+                  setFcmRegistered(true);
+                  return token;
+                }
+                return false;
+              } catch (err) {
+                console.warn('[Onboarding Notification] Error:', err);
+                return false;
+              }
+            }}
+          />
+        )}
       </AnimatePresence>
     </div>
   );

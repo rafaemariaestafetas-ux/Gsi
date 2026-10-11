@@ -10,6 +10,8 @@ import { ptBR } from 'date-fns/locale';
 import { toJpeg } from 'html-to-image';
 import { shareContent } from '../lib/shareService';
 import { triggerSuccessHaptic, triggerLightHaptic } from '../lib/haptics';
+import { isOnline } from '../services/networkService';
+import { addToQueue } from '../services/offlineSyncService';
 
 export default function ProfileView({ 
   userId, 
@@ -55,15 +57,30 @@ export default function ProfileView({
   };
 
   const getEntries = async () => {
-    const { data } = await supabase
-      .from('time_entries')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('month', viewDate.getMonth())
-      .eq('year', viewDate.getFullYear())
-      .order('day', { ascending: false });
+    const localKey = `entries_${viewDate.getMonth()}_${viewDate.getFullYear()}`;
+    try {
+      const localData = JSON.parse(localStorage.getItem(localKey) || '[]');
+      if (Array.isArray(localData) && localData.length > 0) {
+        setEntries(localData);
+      }
+    } catch {}
 
-    if (data) setEntries(data);
+    if (!isOnline()) return;
+
+    try {
+      const { data } = await supabase
+        .from('time_entries')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('month', viewDate.getMonth())
+        .eq('year', viewDate.getFullYear())
+        .order('day', { ascending: false });
+
+      if (data) {
+        setEntries(data);
+        localStorage.setItem(localKey, JSON.stringify(data));
+      }
+    } catch {}
   };
 
   const handleDayClick = (day: number, entry?: TimeEntry) => {
@@ -78,7 +95,8 @@ export default function ProfileView({
     if (!selectedDayEntry) return;
     setSavingEdit(true);
     
-    const newEntry = {
+    const isOfflineNow = !isOnline();
+    const newEntry: TimeEntry = {
       user_id: userId,
       day: selectedDayEntry.day,
       month: viewDate.getMonth(),
@@ -87,8 +105,28 @@ export default function ProfileView({
       obra: editIsAbsence ? 'FALTA' : (editObra.toUpperCase() || 'OBRA NÃO DEFINIDA'),
       description: profile?.role?.toUpperCase() || 'OFICIAL',
       is_absence: editIsAbsence,
-      absence_reason: editIsAbsence ? editAbsenceReason : ''
+      absence_reason: editIsAbsence ? editAbsenceReason : '',
+      sync_status: isOfflineNow ? 'pending_sync' : 'synced'
     };
+
+    const localKey = `entries_${viewDate.getMonth()}_${viewDate.getFullYear()}`;
+
+    // Update local state and cache immediately
+    setEntries(prev => {
+      const filtered = prev.filter(e => e.day !== selectedDayEntry.day);
+      const updated = editHours === '0' && !editIsAbsence ? filtered : [...filtered, newEntry].sort((a, b) => a.day - b.day);
+      localStorage.setItem(localKey, JSON.stringify(updated));
+      return updated;
+    });
+
+    if (isOfflineNow) {
+      if (editHours !== '0' || editIsAbsence) {
+        addToQueue('time_entry', newEntry);
+      }
+      setSelectedDayEntry(null);
+      setSavingEdit(false);
+      return;
+    }
 
     try {
       // Delete existing for that day if any
@@ -102,13 +140,29 @@ export default function ProfileView({
 
       // Insert if not just a deletion (0 hours without absence)
       if (editHours !== '0' || editIsAbsence) {
-        await supabase.from('time_entries').insert([newEntry]);
+        const { error } = await supabase.from('time_entries').insert([{
+          user_id: userId,
+          day: selectedDayEntry.day,
+          month: viewDate.getMonth(),
+          year: viewDate.getFullYear(),
+          hours: editIsAbsence ? '0' : editHours,
+          obra: editIsAbsence ? 'FALTA' : (editObra.toUpperCase() || 'OBRA NÃO DEFINIDA'),
+          description: profile?.role?.toUpperCase() || 'OFICIAL',
+          is_absence: editIsAbsence,
+          absence_reason: editIsAbsence ? editAbsenceReason : ''
+        }]);
+        if (error) throw error;
       }
       
       await getEntries();
       setSelectedDayEntry(null);
     } catch (err) {
-      alert('Erro ao salvar alteração');
+      console.warn('[ProfileView] Offline fallback for edit:', err);
+      if (editHours !== '0' || editIsAbsence) {
+        newEntry.sync_status = 'pending_sync';
+        addToQueue('time_entry', newEntry);
+      }
+      setSelectedDayEntry(null);
     } finally {
       setSavingEdit(false);
     }
@@ -355,6 +409,9 @@ export default function ProfileView({
                         )}
                         {isSameDay(day, new Date()) && (
                           <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full border-2 border-[#1c2431] shadow-lg" />
+                        )}
+                        {entry?.sync_status === 'pending_sync' && (
+                          <div className="absolute -top-1 -left-1 w-2 h-2 bg-amber-400 rounded-full border border-[#1c2431] shadow-lg animate-pulse" title="Pendente de sincronização" />
                         )}
                       </button>
                     );

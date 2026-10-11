@@ -2,18 +2,33 @@ import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+import { Cloud, CloudOff, CheckCircle2, Clock, WifiOff, RefreshCw } from 'lucide-react';
 import { playSuccessSound } from '../lib/sounds';
 import { triggerLightHaptic, triggerSuccessHaptic, triggerWarningHaptic } from '../lib/haptics';
 import { AbsenceJustificationModal } from './AbsenceJustificationModal';
+import { TimeEntry } from '../types';
 
 interface ClockMarkingProps {
   onMark: (hours: number) => void;
   onAbsence: (reason: string) => void;
   isDarkMode: boolean;
   hasMarkedToday?: boolean;
+  todayEntry?: TimeEntry | null;
+  isOffline?: boolean;
+  pendingSyncCount?: number;
+  onSyncNow?: () => void;
 }
 
-export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedToday = false }: ClockMarkingProps) {
+export default function ClockMarking({ 
+  onMark, 
+  onAbsence, 
+  isDarkMode, 
+  hasMarkedToday = false,
+  todayEntry,
+  isOffline = false,
+  pendingSyncCount = 0,
+  onSyncNow
+}: ClockMarkingProps) {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [selectedHours, setSelectedHours] = useState(8);
   const [isSunday, setIsSunday] = useState(new Date().getDay() === 0);
@@ -127,17 +142,51 @@ export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedT
         )}
 
         <div className="space-y-4 pt-4">
+          {/* Offline Notice Banner if disconnected and not marked yet */}
+          {isOffline && !hasMarkedToday && (
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                <CloudOff size={16} />
+              </div>
+              <div className="text-left">
+                <p className="text-[11px] font-bold text-amber-300 leading-tight">Modo Offline Activo</p>
+                <p className="text-[10px] text-white/60 leading-tight">Pode marcar ponto à vontade. Será guardado no telemóvel e sincronizado assim que houver rede.</p>
+              </div>
+            </div>
+          )}
+
           {!isSunday ? (
             hasMarkedToday ? (
-              <div className="w-full bg-[#10b981]/10 border border-[#10b981]/30 text-[#10b981] py-6 rounded-[2rem] font-black text-sm uppercase tracking-[0.3em] flex flex-col items-center justify-center gap-1 shadow-lg">
-                <span className="flex items-center gap-2">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
-                  </svg>
-                  Ponto Registrado
-                </span>
-                <span className="text-[8px] opacity-60 tracking-widest font-bold">Bom trabalho hoje!</span>
-              </div>
+              todayEntry?.sync_status === 'pending_sync' ? (
+                <div className="w-full bg-amber-500/10 border border-amber-500/40 text-amber-300 py-5 px-4 rounded-[2rem] flex flex-col items-center justify-center gap-2 shadow-lg shadow-amber-950/20">
+                  <div className="flex items-center gap-2 font-black text-xs uppercase tracking-widest text-amber-400">
+                    <Cloud size={18} className="animate-pulse" />
+                    Ponto Guardado Offline
+                  </div>
+                  <span className="text-[11px] font-semibold text-amber-200/90 text-center leading-snug">
+                    Pendente de sincronização — vai enviar para o Supabase assim que voltar a rede.
+                  </span>
+                  {!isOffline && onSyncNow && (
+                    <button
+                      onClick={onSyncNow}
+                      className="mt-1 bg-amber-400 hover:bg-amber-300 text-black font-black text-[10px] uppercase tracking-widest px-4 py-1.5 rounded-full transition-all flex items-center gap-1.5 active:scale-95"
+                    >
+                      <RefreshCw size={12} />
+                      Sincronizar Agora
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="w-full bg-[#10b981]/10 border border-[#10b981]/30 text-[#10b981] py-6 rounded-[2rem] font-black text-sm uppercase tracking-[0.3em] flex flex-col items-center justify-center gap-1 shadow-lg">
+                  <span className="flex items-center gap-2">
+                    <CheckCircle2 size={18} />
+                    Ponto Registado
+                  </span>
+                  <span className="text-[8px] opacity-70 tracking-widest font-bold">
+                    Sincronizado na cloud com sucesso!
+                  </span>
+                </div>
+              )
             ) : (
               <button
                 onClick={() => {
@@ -170,10 +219,22 @@ export default function ClockMarking({ onMark, onAbsence, isDarkMode, hasMarkedT
               Marcar Falta / Justificar
             </button>
           )}
+
+          {/* Pending items counter if any offline points await sync */}
+          {pendingSyncCount > 0 && todayEntry?.sync_status !== 'pending_sync' && (
+            <div className="flex items-center justify-center gap-2 text-[10px] font-bold text-amber-400/90 bg-amber-400/10 border border-amber-400/20 rounded-xl py-2 px-3">
+              <Cloud size={13} className="animate-pulse" />
+              <span>{pendingSyncCount} ponto{pendingSyncCount > 1 ? 's' : ''} guardado{pendingSyncCount > 1 ? 's' : ''} offline aguardando envio</span>
+            </div>
+          )}
         </div>
 
         <p className="text-[10px] font-black text-white/20 uppercase tracking-[0.2em] text-center">
-          {isSunday ? 'Bom descanso! Voltamos amanhã.' : hasMarkedToday ? 'O ponto para o dia de hoje já foi sincronizado.' : `Entrada Livre até 23:59 | Total Selecionado: ${selectedHours}h`}
+          {isSunday 
+            ? 'Bom descanso! Voltamos amanhã.' 
+            : hasMarkedToday 
+            ? (todayEntry?.sync_status === 'pending_sync' ? 'Guardado localmente. Aguardando rede.' : 'Ponto de hoje sincronizado.') 
+            : `Entrada Livre até 23:59 | Total Selecionado: ${selectedHours}h`}
         </p>
       </div>
 

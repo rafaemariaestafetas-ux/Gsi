@@ -15,6 +15,8 @@ export const HIGH_PRIORITY_CHANNEL_ID = 'gsi_high_priority_channel';
 let currentUserId: string | null = null;
 let nativeListenersInitialized = false;
 let pendingTokenResolvers: Array<(token: string | null) => void> = [];
+let onNotificationReceivedCallback: ((notification: PushNotificationSchema) => void) | null = null;
+let onNotificationActionCallback: ((action: ActionPerformed) => void) | null = null;
 
 /**
  * Configure Android 8.0+ High Priority Notification Channel
@@ -42,15 +44,30 @@ export async function configureAndroidNotificationChannel(): Promise<void> {
 }
 
 /**
- * Initializes native event listeners once.
- * Prevents memory leaks and duplicate listener crashes on Android.
+ * Configures all native push listeners strictly ONCE without duplication.
+ * Never throws errors to ensure zero crashes.
  */
-function ensureNativeListeners() {
-  if (!Capacitor.isNativePlatform() || nativeListenersInitialized) return;
+export function setupNativePushNotifications(options?: {
+  userId?: string;
+  onNotificationReceived?: (notification: PushNotificationSchema) => void;
+  onNotificationActionPerformed?: (action: ActionPerformed) => void;
+}): void {
+  if (options?.userId) {
+    currentUserId = options.userId;
+  }
+  if (options?.onNotificationReceived) {
+    onNotificationReceivedCallback = options.onNotificationReceived;
+  }
+  if (options?.onNotificationActionPerformed) {
+    onNotificationActionCallback = options.onNotificationActionPerformed;
+  }
+
+  if (!Capacitor.isNativePlatform()) return;
+  if (nativeListenersInitialized) return;
   nativeListenersInitialized = true;
 
   try {
-    // 1. Token registration success listener
+    // 1. Registration Success
     PushNotifications.addListener('registration', async (token: Token) => {
       try {
         console.log('[Native Push] Token FCM registrado com sucesso!');
@@ -62,7 +79,6 @@ function ensureNativeListeners() {
           await saveTokenToDatabase(currentUserId, fcmToken, 'android');
         }
 
-        // Resolve all waiting callers
         const resolvers = [...pendingTokenResolvers];
         pendingTokenResolvers = [];
         resolvers.forEach(resolve => {
@@ -71,25 +87,49 @@ function ensureNativeListeners() {
       } catch (err) {
         console.error('[Native Push] Erro ao processar token recebido:', err);
       }
-    });
+    }).catch(err => console.warn('[Native Push] addListener registration note:', err));
 
-    // 2. Token registration error listener
+    // 2. Registration Error
     PushNotifications.addListener('registrationError', (error: any) => {
-      console.error('[Native Push] Erro no registro de notificações:', error);
+      console.warn('[Native Push] Erro no registro de notificações:', error);
       const resolvers = [...pendingTokenResolvers];
       pendingTokenResolvers = [];
       const cached = localStorage.getItem('gsi_fcm_token');
       resolvers.forEach(resolve => {
         try { resolve(cached); } catch {}
       });
-    });
+    }).catch(err => console.warn('[Native Push] addListener registrationError note:', err));
+
+    // 3. Push Notification Received in Foreground
+    PushNotifications.addListener('pushNotificationReceived', (notification: PushNotificationSchema) => {
+      try {
+        console.log('[Native Push] Recebida em primeiro plano:', notification);
+        if (onNotificationReceivedCallback) {
+          onNotificationReceivedCallback(notification);
+        }
+      } catch (err) {
+        console.error('[Native Push] Erro no callback pushNotificationReceived:', err);
+      }
+    }).catch(err => console.warn('[Native Push] addListener pushNotificationReceived note:', err));
+
+    // 4. Push Notification Action Performed (Tapped)
+    PushNotifications.addListener('pushNotificationActionPerformed', (action: ActionPerformed) => {
+      try {
+        console.log('[Native Push] Notificação clicada pelo utilizador:', action);
+        if (onNotificationActionCallback) {
+          onNotificationActionCallback(action);
+        }
+      } catch (err) {
+        console.error('[Native Push] Erro no callback pushNotificationActionPerformed:', err);
+      }
+    }).catch(err => console.warn('[Native Push] addListener pushNotificationActionPerformed note:', err));
   } catch (err) {
-    console.warn('[Native Push] Erro ao inicializar listeners nativos:', err);
+    console.warn('[Native Push] Erro ao registrar listeners nativos:', err);
   }
 }
 
 /**
- * Check if native notification permission is currently granted
+ * Check if native notification permission is currently granted (silent, no prompt)
  */
 export async function checkNativeNotificationPermission(): Promise<boolean> {
   if (!Capacitor.isNativePlatform()) return false;
@@ -103,8 +143,8 @@ export async function checkNativeNotificationPermission(): Promise<boolean> {
 
 /**
  * Requests native Android notification permissions and registers the device.
- * Stores the FCM token in Supabase (user_push_tokens table) with platform: 'android'.
- * Never throws unhandled errors to guarantee zero crashes on launch or activation.
+ * Called ONLY upon user explicit interaction (button click in Settings/Profile or Onboarding).
+ * Never throws unhandled errors to guarantee zero crashes.
  */
 export async function requestNativeNotificationPermission(userId?: string): Promise<string | null> {
   if (userId) {
@@ -117,21 +157,21 @@ export async function requestNativeNotificationPermission(userId?: string): Prom
   }
 
   try {
-    ensureNativeListeners();
+    setupNativePushNotifications({ userId });
     await configureAndroidNotificationChannel();
 
     // 1. Check existing permission
-    let status = await PushNotifications.checkPermissions();
-    console.log('[Native Push] Status de permissão atual:', status.receive);
+    let status = await PushNotifications.checkPermissions().catch(() => ({ receive: 'prompt' as any }));
+    console.log('[Native Push] Status de permissão verificado:', status.receive);
 
-    // 2. If not granted, request native permission
+    // 2. Request native permission ONLY here on user tap
     if (status.receive !== 'granted') {
-      status = await PushNotifications.requestPermissions();
-      console.log('[Native Push] Status após solicitação ao usuário:', status.receive);
+      status = await PushNotifications.requestPermissions().catch(() => ({ receive: 'denied' as any }));
+      console.log('[Native Push] Status após solicitação ao utilizador:', status.receive);
     }
 
     if (status.receive !== 'granted') {
-      console.log('[Native Push] Permissão não concedida pelo usuário.');
+      console.log('[Native Push] Permissão recusada pelo utilizador.');
       return null;
     }
 
@@ -139,7 +179,6 @@ export async function requestNativeNotificationPermission(userId?: string): Prom
     const registrationPromise = new Promise<string | null>((resolve) => {
       let resolved = false;
 
-      // Safety timeout so caller never hangs
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           resolved = true;
@@ -157,18 +196,17 @@ export async function requestNativeNotificationPermission(userId?: string): Prom
       });
     });
 
-    // Call native register
     await PushNotifications.register().catch(regErr => {
       console.warn('[Native Push] Erro ao chamar PushNotifications.register():', regErr);
     });
 
     const token = await registrationPromise;
-    if (token && userId) {
-      await saveTokenToDatabase(userId, token, 'android');
+    if (token && (userId || currentUserId)) {
+      await saveTokenToDatabase(userId || currentUserId!, token, 'android');
     }
     return token;
   } catch (err) {
-    console.error('[Native Push] Erro durante ativação de notificações nativas:', err);
+    console.error('[Native Push] Erro seguro durante ativação de notificações nativas:', err);
     return localStorage.getItem('gsi_fcm_token');
   }
 }
@@ -179,14 +217,19 @@ export async function requestNativeNotificationPermission(userId?: string): Prom
 export const requestFCMToken = requestNativeNotificationPermission;
 
 /**
- * Initializes push notifications on app launch if on native platform.
+ * Silent initialization on launch without prompting the user.
+ * If permission was ALREADY granted in Android, registers silently.
  */
 export async function initializePushNotifications(): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
   try {
-    await requestNativeNotificationPermission();
+    await configureAndroidNotificationChannel();
+    const granted = await checkNativeNotificationPermission();
+    if (granted) {
+      await PushNotifications.register().catch(() => {});
+    }
   } catch (err) {
-    console.warn('[Native Push] Erro na inicialização:', err);
+    console.warn('[Native Push] Erro seguro na verificação inicial:', err);
   }
 }
 
@@ -197,7 +240,6 @@ export async function saveTokenToDatabase(userId: string, token: string, platfor
   if (!userId || !token) return;
 
   try {
-    // 1. Save to Supabase user_push_tokens table with platform: 'android'
     const { error: sbErr } = await supabase.from('user_push_tokens').upsert({
       user_id: userId,
       token: token,
@@ -208,10 +250,9 @@ export async function saveTokenToDatabase(userId: string, token: string, platfor
     if (sbErr) {
       console.warn('[Native Push] Nota ao salvar token no Supabase:', sbErr.message);
     } else {
-      console.log(`[Native Push] Token FCM salvo no Supabase com platform: 'android' (user_id: ${userId})`);
+      console.log(`[Native Push] Token FCM salvo no Supabase (user_id: ${userId})`);
     }
 
-    // 2. Also inform server proxy if online
     try {
       await fetch('/api/save-token', {
         method: 'POST',
@@ -229,29 +270,18 @@ export async function saveTokenToDatabase(userId: string, token: string, platfor
 }
 
 /**
- * Listen for foreground push messages on Android
+ * Listen for foreground push messages on Android (delegates to callback)
  */
 export function setupForegroundMessageListener(onNotification: (payload: any) => void): void {
-  if (!Capacitor.isNativePlatform()) return;
-
-  try {
-    PushNotifications.addListener('pushNotificationReceived', (notification: PushNotificationSchema) => {
-      try {
-        console.log('[Native Push] Notificação recebida em foreground:', notification);
-        onNotification({
-          notification: {
-            title: notification.title,
-            body: notification.body
-          },
-          data: notification.data
-        });
-      } catch (err) {
-        console.error('[Native Push] Erro no callback de pushNotificationReceived:', err);
-      }
-    }).catch(() => {});
-  } catch (err) {
-    console.warn('[Native Push] Erro ao registrar foreground listener:', err);
-  }
+  onNotificationReceivedCallback = (notification: PushNotificationSchema) => {
+    onNotification({
+      notification: {
+        title: notification.title,
+        body: notification.body
+      },
+      data: notification.data
+    });
+  };
 }
 
 /**
@@ -318,7 +348,7 @@ export async function triggerBackgroundNotification(notification: {
 }
 
 /**
- * Deprecated no-ops for backwards compatibility if referenced
+ * Deprecated no-ops for backwards compatibility if referenced (Web Push completely disabled on Android)
  */
 export async function registerFCMServiceWorker(): Promise<null> {
   return null;

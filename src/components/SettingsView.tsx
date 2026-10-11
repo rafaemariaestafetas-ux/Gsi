@@ -389,6 +389,18 @@ export default function SettingsView({ userId, onBack, onUpdate, isDarkMode = tr
             <Camera size={15} />
             Pré-Autorizar Câmera e Microfone
           </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              triggerLightHaptic();
+              window.dispatchEvent(new CustomEvent('gsi:open_onboarding'));
+            }}
+            className="w-full py-3.5 bg-white/5 hover:bg-[#d4af37]/15 border border-white/10 hover:border-[#d4af37]/40 text-white/80 hover:text-[#d4af37] font-bold text-[11px] rounded-2xl transition-all flex items-center justify-center gap-2 active:scale-98"
+          >
+            <Sparkles size={14} className="text-[#d4af37]" />
+            Ver Tutorial Inicial do App (Onboarding)
+          </button>
         </div>
 
         {/* Atualização Automática de APK (GitHub Releases) */}

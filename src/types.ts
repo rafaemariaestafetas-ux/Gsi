@@ -80,6 +80,7 @@ export interface Message {
   };
   reply_to?: ReplyInfo;
   reactions?: Record<string, string[]>; // emoji -> [user_id_1, user_id_2]
+  sync_status?: 'synced' | 'pending' | 'sending' | 'failed';
 }
 
 export interface Block {
@@ -128,6 +129,7 @@ export interface GroupMessage {
   sender_avatar?: string;
   reply_to?: ReplyInfo;
   reactions?: Record<string, string[]>;
+  sync_status?: 'synced' | 'pending' | 'sending' | 'failed';
 }
 
 export interface MessageReaction {
@@ -174,4 +176,5 @@ export interface TimeEntry {
   absence_reason?: string;
   created_at?: string;
   user_id: string;
+  sync_status?: 'synced' | 'pending_sync';
 }
